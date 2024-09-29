@@ -3,14 +3,11 @@ from transformers import GPT2TokenizerFast
 from datasets import load_dataset
 from itertools import chain
 import numpy as np
-import torch
-
-import urllib.request
-import zipfile
+import tempfile
+from Bio import SeqIO
 import requests
 import json
 from datasets import Dataset
-
 from torch.utils.data import DataLoader, DistributedSampler
 
 
@@ -95,6 +92,9 @@ def lambada_detokenizer(text):
     text = text.replace("”", '"')
     return '\n'+text.strip()
 
+def acyp_detokenizer(text):
+    return text 
+
 
 def get_lambada_test_dataset():
     url = "https://openaipublic.blob.core.windows.net/gpt-2/data/lambada_test.jsonl"
@@ -116,6 +116,38 @@ def get_lambada_test_dataset():
     return dataset
 
 
+def get_acyp_dataset():
+    url = "https://github.com/dacarlin/protein-transformers/raw/refs/heads/main/hypf.fa"
+
+    def download_fasta_to_tempfile(url):
+        # Create a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, mode='w+') as temp_fasta:
+            response = requests.get(url)
+            temp_fasta.write(response.text)
+            temp_fasta.flush()  # Ensure the file is written to disk
+            return temp_fasta.name
+        
+    def read_fasta_from_file(filepath):
+        # Read the FASTA file using BioPython
+        sequence_list = []
+        with open(filepath, "r") as fasta_handle:
+            for record in SeqIO.parse(fasta_handle, "fasta"):
+                sequence_list.append({
+                    "text": str(record.seq),  # Convert sequence object to string
+                })
+        return sequence_list
+
+    # Download FASTA to temporary file
+    fasta_filepath = download_fasta_to_tempfile(url)
+
+    # Read and parse FASTA sequences from the temporary file
+    acyp_data = read_fasta_from_file(fasta_filepath)
+    dataset = Dataset.from_list(acyp_data)
+
+    return dataset
+
+
+
 def get_dataset(name, mode, cache_dir=None, block_size=1024, num_proc=8):
     if name == "wikitext103":
         dataset = load_dataset("wikitext", name="wikitext-103-raw-v1", cache_dir=cache_dir)
@@ -125,11 +157,15 @@ def get_dataset(name, mode, cache_dir=None, block_size=1024, num_proc=8):
         dataset = load_dataset("ptb_text_only", cache_dir=cache_dir)
     elif name == "lambada":
         dataset = get_lambada_test_dataset()
+    elif name == "acyp":
+        dataset = get_acyp_dataset() 
     else:
         dataset = load_dataset(name, cache_dir=cache_dir)
 
     if name == "lambada":
         data = dataset
+    elif name == "acyp":
+        data = dataset 
     else:
         data = dataset[mode]
 
@@ -141,6 +177,8 @@ def get_dataset(name, mode, cache_dir=None, block_size=1024, num_proc=8):
         detokenizer = lm1b_detokenizer
     elif name == "lambada":
         detokenizer = lambada_detokenizer
+    elif name == "acyp":
+        detokenizer = acyp_detokenizer
     else:
         detokenizer = None
 
@@ -157,6 +195,9 @@ def get_dataset(name, mode, cache_dir=None, block_size=1024, num_proc=8):
     def preprocess_and_tokenize(example):
         if name == "ptb":
             text = example['sentence']
+        if name == "acyp":
+            #print(example["text"])
+            text = example["text"]
         else:
             text = example["text"]
         # print(list(example.keys()))
