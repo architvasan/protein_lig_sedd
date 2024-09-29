@@ -29,7 +29,7 @@ MTDLNRATFLISGLVQGVCFRRASTRDEARRLGVHGWVRNLPDRRVWVLAHEEADVQRLTAWCRKGPPAAKVTEITEREA
 
 It's impossible to tell much just by looking at the sequence, of course, but [folding these proteins with ESMFold](https://esmatlas.com/resources?action=fold) reveals that they are predicted to fold as expected for this protein family (AcyP), despite being only about 25% sequence identical, which is an amazing result for a generative model. 
 
-![img/folded.png]
+![Samples from the SEDD model at 2,000 steps](img/folded.png)
 
 
 ### Using an amino acid tokenizer 
