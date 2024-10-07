@@ -15,10 +15,11 @@ from torch.utils.data import DataLoader, DistributedSampler
 class CharacterTokenizer:
     def __init__(self):
         self.chars = "ACDEFGHIKLMNPQRSTVWY"
-        self.vocab_size = len(self.chars) + 2  # Add 2 for <unk> and <pad> tokens
-        self.char_to_id = {char: i + 2 for i, char in enumerate(self.chars)}
+        self.vocab_size = len(self.chars) + 3  # Add 2 for <unk> and <pad> tokens
+        self.char_to_id = {char: i + 3 for i, char in enumerate(self.chars)}
         self.char_to_id['<unk>'] = 0
         self.char_to_id['<pad>'] = 1
+        self.char_to_id['<eos>'] = 2
         self.id_to_char = {i: char for char, i in self.char_to_id.items()}
 
     def encode(self, text):
@@ -32,6 +33,9 @@ class CharacterTokenizer:
 
     def batch_decode(self, batch_ids):
         return [self.decode(ids) for ids in batch_ids]
+    
+    def __call__(self, text, return_attention_mask=False):
+        return self.encode(text)
 
 
 def cycle_loader(dataloader, sampler=None):
@@ -182,6 +186,8 @@ def get_dataset(name, mode, cache_dir=None, block_size=1024, num_proc=8):
         dataset = get_lambada_test_dataset()
     elif name == "acyp":
         dataset = get_acyp_dataset() 
+    elif name == "uniref50":
+        dataset = load_dataset("agemagician/uniref50", cache_dir=cache_dir)
     else:
         dataset = load_dataset(name, cache_dir=cache_dir)
 
@@ -200,7 +206,7 @@ def get_dataset(name, mode, cache_dir=None, block_size=1024, num_proc=8):
         detokenizer = lm1b_detokenizer
     elif name == "lambada":
         detokenizer = lambada_detokenizer
-    elif name == "acyp":
+    elif name in ["acyp", "uniref50"]:
         detokenizer = acyp_detokenizer
     else:
         detokenizer = None
@@ -214,6 +220,21 @@ def get_dataset(name, mode, cache_dir=None, block_size=1024, num_proc=8):
 
     tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
     EOS = tokenizer.encode(tokenizer.eos_token)[0]
+
+    if name in ["acyp", "uniref50"]:
+
+        # Initialize the tokenizer
+        tokenizer = GPT2TokenizerFast(
+            vocab_file='vocab.json',
+            merges_file='merges.txt',
+            bos_token='<s>',
+            eos_token='</s>',
+            unk_token='<unk>',
+            pad_token='<pad>',
+            mask_token='<mask>'
+        )
+        EOS = tokenizer.encode(tokenizer.eos_token)[0]
+
 
     def preprocess_and_tokenize(example):
         if name == "ptb":

@@ -2,17 +2,16 @@ defaults:
   - _self_
   - model: tiny
 
-
 ngpus: 1
-tokens: 50257
+tokens: 25
 
 training:
-  batch_size: 128
+  batch_size: 256
   accum: 1
   n_iters: 10_000
-  snapshot_freq: 100
+  snapshot_freq: 1_000
   log_freq: 50
-  eval_freq: 100
+  eval_freq: 500
   snapshot_freq_for_preemption: 10000
   weight: standard
   snapshot_sampling: True
@@ -35,7 +34,7 @@ noise:
 
 sampling:
   predictor: euler
-  steps: 128
+  steps: 1024
   noise_removal: True
 
 eval:
@@ -50,9 +49,8 @@ optim:
   beta1: 0.9
   beta2: 0.999
   eps: 1e-8
-  warmup: 2500
+  warmup: 1_000
   grad_clip: 1.
-
 
 hydra:
   run:

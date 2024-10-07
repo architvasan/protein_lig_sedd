@@ -52,5 +52,7 @@ python train.py
 
 Changes needed for proteins: 
 
-- in run_train.py, we'll update the existing tokenizer to one that works for 
-  proteins 
+- in run_train.py, we'll update the existing tokenizer for sampling to one that works for proteins 
+- in data.py, we'll update the tokenizer used when creating datasets 
+- we'll comment out the code using a langauge model to evalute perplexity
+

@@ -25,6 +25,7 @@ torch.backends.cudnn.benchmark = True
 # torch.autograd.set_detect_anomaly(True)
 
 
+
 def setup(rank, world_size, port):
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(port)
@@ -120,7 +121,39 @@ def _run(rank, world_size, cfg):
     # original tokenizer:
     #tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
     # protein tokenizer 
-    tokenizer = data.CharacterTokenizer() 
+    #tokenizer = data.CharacterTokenizer() 
+
+    from collections import OrderedDict
+    from transformers import GPT2TokenizerFast
+    import json
+
+    # Define amino acids and special tokens
+    amino_acids = list("ACDEFGHIKLMNPQRSTVWY")
+    special_tokens = ["<s>", "<pad>", "</s>", "<unk>", "<mask>"]
+    all_tokens = special_tokens + amino_acids
+
+    # Create the vocabulary
+    vocab = OrderedDict((token, idx) for idx, token in enumerate(all_tokens))
+
+    # Save the vocabulary
+    with open('vocab.json', 'w') as f:
+        json.dump(vocab, f)
+
+    # Create an empty merges.txt file
+    with open('merges.txt', 'w') as f:
+        f.write('#version: 0.2\n')
+
+    # Initialize the tokenizer
+    tokenizer = GPT2TokenizerFast(
+        vocab_file='vocab.json',
+        merges_file='merges.txt',
+        bos_token='<s>',
+        eos_token='</s>',
+        unk_token='<unk>',
+        pad_token='<pad>',
+        mask_token='<mask>'
+    )
+
 
     # Build data iterators
     train_ds, eval_ds = data.get_dataloaders(cfg)
@@ -152,6 +185,13 @@ def _run(rank, world_size, cfg):
             batch = next(train_iter)['input_ids'].to(device)
         else:
             batch = next(train_iter).to(device)
+
+        #print(torch.argmax(batch))
+        #print(f"Batch shape: {batch.shape}, dtype: {batch.dtype}, device: {batch.device}")
+        #print(f"Batch min: {batch.min().item()}, max: {batch.max().item()}")
+
+        
+
         loss = train_step_fn(state, batch)
 
         # flag to see if there was movement ie a full batch got computed
@@ -206,20 +246,24 @@ def _run(rank, world_size, cfg):
 
                     if cfg.eval.perplexity:
                         with torch.no_grad():
-                            eval_model = GPT2LMHeadModel.from_pretrained("gpt2-large").to(device).eval()
-                            batches = sample.shape[0] // cfg.eval.perplexity_batch_size
-                            total_perplexity = 0
-                            for i in range(batches):
-                                s = sample[i * cfg.eval.perplexity_batch_size:(i + 1) * cfg.eval.perplexity_batch_size]
-                                loss, logits = eval_model(s, labels=s)[:2]
-                                logits = logits.transpose(-1, -2)
-                                perplexity = F.cross_entropy(logits[..., :-1], s[..., 1:], reduction="none").mean(dim=-1).exp().mean()
-                                total_perplexity += perplexity
-                            total_perplexity /= batches
-                            dist.all_reduce(total_perplexity)
-                            total_perplexity /= world_size
-                            mprint(f"Generative Perplexity at step: {step}. Perplexity: {total_perplexity:.3f}.")
+                            pass
+                            # Let's think about how to evaluate this 
 
-                            del eval_model, logits, loss
+#                             eval_model = GPT2LMHeadModel.from_pretrained("gpt2-large").to(device).eval()
+#                             batches = sample.shape[0] // cfg.eval.perplexity_batch_size
+#                             total_perplexity = 0
+#                             for i in range(batches):
+#                                 s = sample[i * cfg.eval.perplexity_batch_size:(i + 1) * cfg.eval.perplexity_batch_size]
+#                                 print(s)
+#                                 loss, logits = eval_model(s, labels=s)[:2]
+#                                 logits = logits.transpose(-1, -2)
+#                                 perplexity = F.cross_entropy(logits[..., :-1], s[..., 1:], reduction="none").mean(dim=-1).exp().mean()
+#                                 total_perplexity += perplexity
+#                             total_perplexity /= batches
+#                             dist.all_reduce(total_perplexity)
+#                             total_perplexity /= world_size
+#                             mprint(f"Generative Perplexity at step: {step}. Perplexity: {total_perplexity:.3f}.")
+
+#                             del eval_model, logits, loss
 
                     dist.barrier()
