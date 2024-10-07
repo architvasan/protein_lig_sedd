@@ -11,6 +11,29 @@ from datasets import Dataset
 from torch.utils.data import DataLoader, DistributedSampler
 
 
+
+class CharacterTokenizer:
+    def __init__(self):
+        self.chars = "ACDEFGHIKLMNPQRSTVWY"
+        self.vocab_size = len(self.chars) + 2  # Add 2 for <unk> and <pad> tokens
+        self.char_to_id = {char: i + 2 for i, char in enumerate(self.chars)}
+        self.char_to_id['<unk>'] = 0
+        self.char_to_id['<pad>'] = 1
+        self.id_to_char = {i: char for char, i in self.char_to_id.items()}
+
+    def encode(self, text):
+        return [self.char_to_id.get(char, 0) for char in text]
+
+    def decode(self, ids):
+        return ''.join(self.id_to_char.get(id, '<unk>') for id in ids)
+
+    def batch_encode(self, texts):
+        return [self.encode(text) for text in texts]
+
+    def batch_decode(self, batch_ids):
+        return [self.decode(ids) for ids in batch_ids]
+
+
 def cycle_loader(dataloader, sampler=None):
     while 1:
         if sampler is not None:

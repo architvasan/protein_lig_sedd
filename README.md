@@ -34,4 +34,23 @@ It's impossible to tell much just by looking at the sequence, of course, but [fo
 
 ### Using an amino acid tokenizer 
 
-[In progress!]
+Setup
+
+Launch A100 instance from Lambda
+
+```
+sudo apt-get update && sudo apt-get dist-upgrade
+python -m pip install transformers datasets einops ninja packaging omegaconf hydra-core 
+python -m pip install flash-attn --no-build-isolation
+```
+
+Then to run training 
+
+```shell 
+python train.py 
+```
+
+Changes needed for proteins: 
+
+- in run_train.py, we'll update the existing tokenizer to one that works for 
+  proteins 

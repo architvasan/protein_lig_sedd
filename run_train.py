@@ -117,8 +117,10 @@ def _run(rank, world_size, cfg):
     initial_step = int(state['step'])
 
     
-    # load in tokenizer
-    tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+    # original tokenizer:
+    #tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+    # protein tokenizer 
+    tokenizer = data.CharacterTokenizer() 
 
     # Build data iterators
     train_ds, eval_ds = data.get_dataloaders(cfg)
