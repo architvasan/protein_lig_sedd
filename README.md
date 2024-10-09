@@ -1,20 +1,20 @@
 # Experiments using score entropy discrete diffusion for protein design 
 
-- This code is a fork of and wholly based on [Aaron Lou's implementation of score entropy discrete diffusion](https://github.com/louaaron/Score-Entropy-Discrete-Diffusion), which is fully described in his research paper (which was voted ICML 2024 Best Paper), "Discrete Diffusion Modeling by Estimating the Ratios of the Data Distribution" ([https://arxiv.org/abs/2310.16834](https://arxiv.org/abs/2310.16834))
-- The goal of this repository is to evaluate the usefulness of score entropy discrete diffusion for understanding protein sequences
-- We hope to be able to use trained models to design new proteins with desired properties 
+This code is a fork of and wholly based on [Aaron Lou's implementation of score entropy discrete diffusion](https://github.com/louaaron/Score-Entropy-Discrete-Diffusion), which is fully described in the research paper (which was voted ICML 2024 Best Paper), "Discrete Diffusion Modeling by Estimating the Ratios of the Data Distribution" by Aaron Lou, Chenlin Meng, and Stefano Ermon ([https://arxiv.org/abs/2310.16834](https://arxiv.org/abs/2310.16834))
+
+The goal of this repository is to evaluate the usefulness of score entropy discrete diffusion for understanding protein sequences. In particular, we hope to evaluate SEDD models trained on UniRef50 compared with existing autogregressive protein transformer models such as ProGen, RITA, and ProtT5
 
 
 ## Resources  
 
 - Original implementation by Aaron Lou https://github.com/louaaron/Score-Entropy-Discrete-Diffusion 
 - Original readme https://github.com/louaaron/Score-Entropy-Discrete-Diffusion 
-- Paper link https://arxiv.org/abs/2310.16834
+- "Discrete Diffusion Modeling by Estimating the Ratios of the Data Distribution" by Aaron Lou, Chenlin Meng, and Stefano Ermon https://arxiv.org/abs/2310.16834
 
 
 ## Experiments 
 
-For the computational setup for these experiments, I'm using a V100 node from [Lambda Labs](https://lambdalabs.com) which costs about $1.25 an hour. After launching A100 instance from Lambda, perform the following updates and installs: 
+For the computational setup for these experiments, I'm using a A100 instance from [Lambda Labs](https://lambdalabs.com) which costs about $1.25 an hour. After launching A100 instance from Lambda, I perform the following updates and installs to update the Torch and CUDA installs to the latest versions, then:
 
 ```
 sudo apt-get update && sudo apt-get dist-upgrade
@@ -28,14 +28,13 @@ Then to run training, edit the config or provide command line options:
 python train.py 
 ```
 
-### Goals 
+Changes from Aaron Lou's original implementation that are needed for modeling protein sequence data are not significant: 
 
-Changes from Aaron Lou's original implementation that are needed for modeling proteins: 
+1. In the training script `run_train.py` and the data loading implementation in `data.py`, we update the existing tokenizer for sampling to one that uses the amino acid vocabulary (plus special tokens)
 
-1. in `run_train.py`, we update the existing tokenizer for sampling to one that works for proteins 
-2. in `data.py` we update the tokenizer used when creating datasets 
-3. we need a different method of evaluating generative perplexity and other useful metrics 
+However, in order for us to evaluate these models, we'll need to think more carefully about downstream use cases. 
 
+1. In the training script we update the evaluations to be protein-specific (comparing against a protein model in generation perplexity and evaluating mutational effect scores using an experimental dataset)
 
 ### Using the existing GPT2 tokenizer
 
@@ -103,15 +102,22 @@ After training the model under several configurations on the AcyP dataset (which
 
 The next step would be to train some SEDD models of different sizes on the UniRef50 dataset and compare to the performance of autogregressive models on the same data. Some good models to compare against: ProGen, RITA, ProtT5. Some model sizes to try: 10M, 100M, 1B, 10B params. 
 
-I adapted the existing data loading code to load the UniRef50 dataset, but haven't trained it get due to the computational cost. It takes about 4 hours to preprocess the dataset using a V100, before training begins. 
+I adapted the existing data loading code to load the UniRef50 dataset, but haven't trained it fully yet, due to the computational cost. From my experiments, it takes about 4 hours to preprocess the dataset using an A100, before training begins. Once training begins, for the tiny model on short sequences of length 128, we get about 1,000 steps of batch size 128 per minute on the A100, which is about 15 million tokens per minute. UniRef50 contains around 40 million sequences with an average length of 256, for a total of 10 billion tokens. I approximate this will take over 10 hours to train on the A100 (for the tiny model). 
+
+I've provided the code to load UniRef50 in this repo:
 
 ```python 
 elif name == "uniref50":
-        dataset = load_dataset("agemagician/uniref50", cache_dir=cache_dir)
+    dataset = load_dataset("agemagician/uniref50", cache_dir=cache_dir)
 ```
 
-Next steps: 
+You can train on UniRef50 by providing the dataset name "uniref50" in the Hydra config. 
+
+Next steps (2024-10-7): 
 
 - [ ] Obtain funding to train the model on the UniRef50 dataset
-- [ ] Train model series on the UniRef50 dataset and compare against ProGen, RITA, and ProtT5
-- [ ] Publish results 
+- [ ] Train model param grid (model size and layers) on the UniRef50 dataset and compare against ProGen, RITA, and ProtT5 on evaluation metrics  
+
+Errata: 
+
+- In the figures, Sample 3 is labeled "Sample 2" 
