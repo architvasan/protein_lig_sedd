@@ -36,7 +36,9 @@ However, in order for us to evaluate these models, we'll need to think more care
 
 1. In the training script we update the evaluations to be protein-specific (comparing against a protein model in generation perplexity and evaluating mutational effect scores using an experimental dataset)
 
-### Using the existing GPT2 tokenizer
+### Adapting the implementation for protein data 
+
+#### Using the existing GPT2 tokenizer
 
 First I just wanted to try using the exact GPT2 tokenizer (with vocab size 50,257) on protein sequences, without any changes. After implementing a simple protein sequence dataset following the existing code, I was surprised to see that after only about 2,000 steps (batch size 256), the model is already producing very realistic protein sequences: 
 
@@ -54,7 +56,7 @@ It's impossible to tell much just by looking at the sequence, of course, but [fo
 ![Samples from the SEDD model at 2,000 steps](img/folded.png)
 
 
-### Using an amino acid tokenizer 
+#### Using an amino acid tokenizer 
 
 I chose to implement tokenization for proteins by supplying a modified vocabulary to the existing `GPT2TokenizerFast`. I also tried creating a tokenizer class from scratch, but using the existing implementation with a modified vocabulary worked best because of the many implementation details you'd have to copy if recreating from scratch. 
 
@@ -118,6 +120,23 @@ Next steps (2024-10-7):
 - [ ] Obtain funding to train the model on the UniRef50 dataset
 - [ ] Train model param grid (model size and layers) on the UniRef50 dataset and compare against ProGen, RITA, and ProtT5 on evaluation metrics  
 
-Errata: 
 
-- In the figures, Sample 3 is labeled "Sample 2" 
+### Protein design evals for score entropy discrete diffusion models 
+
+The primary evaluations done in the protein sequence modeling literature fall into three broad categories. I'm going to leave out the use of sequence-based embeddings to predict structures, as is done in AlphaFold and ESMFold, and focus on direct uses of protein language models. 
+
+1. Using model representation (embeddings) for a downstream task (for example: predicting which class a protein belongs in, or predicting the per-token secondary structure)
+2. Predicting the likelihood of sequences or mutants of sequences (for example, eliminating low-confidence proteins from a metagenomic search, or removing evolutionary-unlikely mutations from design space)
+3. Sampling from the model to generate new sequences (potentially conditionally)
+
+I think the trick will be, can we design evals that are feasible for both autogregressive models and SEDD models, so that we can directly compare performance? We already know that we can effectively train on the same datasets. 
+
+There are of course some unique evaluations that would be very interesting for SEDD models. First, I'd like to see how well the concrete score predicts mutations for sequences "one token away" and recapitulates phylogenetic distances. It's also very interesting to think about prompting the SEDD model: since we can do arbitrary discontinuous prompts, we have a good mechanism for performing "fill in blank" design, we can also be achieved via masking in autogregressive models. 
+
+I'd propose the following evals for SEDD models for protein design, in addition to the classics like secondary structure prediction. 
+
+**Mutation effect prediction.** Calculate the score of mutated sequences under the model using the concrete score and assess correlation with experimentally-observed mutation effects. Carefully select benchmark data that measures sequence fitness in a natural context—protein engineering or design benchmarks [will not have signal](https://alexcarlin.bearblog.dev/the-problem-with-proteingym).
+
+**Metagenomic distance.** Can the model tell the difference between two functional homologs, and "decoy" sets of proteins that are evolutionarily related but perform different functions? On samples of metagenomic space experimentally tested for a particular function, does the model assign higher scores to proteins with better intrinsic properties such as stability or $k_{cat}$? Can the model separately model taxonomy and functional properties? 
+
+**Relative functional importance.** Broadly, does the model learn which parts of proteins are fungible and which are necessary? Does the model correctly ignore small changes to irrelevant amino acids while strongly disfavoring non-functional sequences? As a first pass at this, collected labeled active site residues from UniProt and assess scores at those positions. 
