@@ -191,7 +191,7 @@ def get_dataset(name, mode, cache_dir=None, block_size=1024, num_proc=8):
             return text
         return detok
 
-    tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+    tokenizer = GPT2TokenizerFast.from_pretrained("openai-community/gpt2")#'gpt2')
     EOS = tokenizer.encode(tokenizer.eos_token)[0]
 
     if name in ["acyp", "uniref50"]:
