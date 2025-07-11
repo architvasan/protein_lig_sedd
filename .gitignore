@@ -21,3 +21,9 @@ core
 **.log
 *.jsonl
 prot_lig_sedd/
+core.2947525
+model/.transformer.py.swp
+plinder/
+plinder_OLD/
+run_train_smiles.err
+train_smiles.err
