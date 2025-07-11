@@ -1,3 +1,5 @@
+work_dir: /eagle/FoundEpidem/avasan/IDEAL/DiffusionModels/protein_lig_sedd
+
 defaults:
   - _self_
   - model: tiny
@@ -6,13 +8,13 @@ ngpus: 1
 tokens: 25
 
 training:
-  batch_size: 256
+  batch_size: 4
   accum: 1
-  n_iters: 10_000
-  snapshot_freq: 1_000
+  n_iters: 100 #10_000
+  snapshot_freq: 100 #1_000
   log_freq: 50
-  eval_freq: 500
-  snapshot_freq_for_preemption: 10000
+  eval_freq: 50
+  snapshot_freq_for_preemption: 100
   weight: standard
   snapshot_sampling: True
   ema: 0.9999
@@ -34,13 +36,13 @@ noise:
 
 sampling:
   predictor: euler
-  steps: 1024
+  steps: 100
   noise_removal: True
 
 eval:
-  batch_size: 128
+  batch_size: 4
   perplexity: True
-  perplexity_batch_size: 32
+  perplexity_batch_size: 4
 
 optim:
   weight_decay: 0
