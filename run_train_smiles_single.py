@@ -29,19 +29,19 @@ import yaml
 class Train_pl_sedd:
     work_dir: str
     cfg_fil: str
-    plinder_output_dir: str='./plinder',
-    plinder_data_dir:str ='./plinder',
+    plinder_output_dir: str='./plinder'
+    plinder_data_dir:str ='./plinder'
 
-    max_samples:int =200,
-    batch_size: int =2,
-    num_workers: int=1,
-    train_ratio: int=0.8,
-    val_ratio: int=0.1,#args.val_ratio,
-    max_protein_len: int=1024,#args.protein_max_len,
-    max_ligand_len:int =128,#args.mol_max_len,
-    use_structure:bool =False,#args.use_structure,
-    seed=42,#args.seed,
-    force_reprocess=False,#args.force_reprocess
+    max_samples:int =200
+    batch_size: int =2
+    num_workers: int=1
+    train_ratio: int=0.8
+    val_ratio: int=0.1#args.val_ratio,
+    max_protein_len: int=1024#args.protein_max_len,
+    max_ligand_len:int =128#args.mol_max_len,
+    use_structure:bool =False#args.use_structure,
+    seed:int=42#args.seed,
+    force_reprocess:bool=False#args.force_reprocess
 
     def __post__init(self):
         with open(cfg_fil, "r") as f:
