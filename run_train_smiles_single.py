@@ -116,29 +116,98 @@ class Train_pl_sedd:
         train_iter = iter(self.train_ds)
         eval_iter = iter(self.eval_ds)
 
+        # Build one-step training and evaluation functions
+        optimize_fn = losses.optimization_manager(self.cfg)
+        train_step_fn = losses.get_step_fn(self.noise, self.graph, True, optimize_fn, self.cfg.training.accum)
+        eval_step_fn = losses.get_step_fn(self.noise, self.graph, False, optimize_fn, self.cfg.training.accum)
+
+        if self.cfg.training.snapshot_sampling:
+            sampling_shape = (self.cfg.training.batch_size // (self.cfg.ngpus * self.cfg.training.accum), self.cfg.model.length)
+            sampling_fn = sampling.get_sampling_fn(self.cfg, self.graph, self.noise, sampling_shape, self.sampling_eps, self.device)
+
+        num_train_steps = self.cfg.training.n_iters
+        print(f"Starting training loop at step {initial_step}.")
+
+        while self.state['step'] < num_train_steps + 1:
+            step = self.state['step']
 
 
+        if self.cfg.data.train != "text8":
+            #print(next(train_iter)['ligand_tokens'].to(device))
+            batch = next(train_iter)['ligand_tokens'].to(device)
+        else:
+            batch = next(train_iter).to(device)
 
+        loss = train_step_fn(self.state, self.batch)
 
+        # flag to see if there was movement ie a full batch got computed
+        if step != self.state['step']:
+            if step % self.cfg.training.log_freq == 0:
+                dist.all_reduce(loss)
+                loss /= world_size
 
-         
+                print("step: %d, training_loss: %.5e" % (step, loss.item()))
 
+            if step % self.cfg.training.snapshot_freq_for_preemption == 0 and rank == 0:
+                utils.save_checkpoint(self.checkpoint_meta_dir, self.state)
 
+            if step % self.cfg.training.eval_freq == 0:
+                if self.cfg.data.valid != "text8":
+                    eval_batch = next(eval_iter)['input_ids'].to(self.device)
+                else:
+                    eval_batch = next(train_iter).to(self.device)
+                eval_loss = eval_step_fn(self.state, eval_batch)
 
+                dist.all_reduce(eval_loss)
+                eval_loss /= world_size
 
+                print("step: %d, evaluation_loss: %.5e" % (step, eval_loss.item()))
 
+            if step > 0 and step % self.cfg.training.snapshot_freq == 0 or step == num_train_steps:
+                # Save the checkpoint.
+                save_step = step // self.cfg.training.snapshot_freq
+                if rank == 0:
+                    utils.save_checkpoint(os.path.join(
+                        self.checkpoint_dir, f'checkpoint_{save_step}.pth'), self.state)
 
+                # Generate and save samples
+                if self.cfg.training.snapshot_sampling:
+                    print(f"Generating text at step: {step}")
 
+                    this_sample_dir = os.path.join(self.sample_dir, "iter_{}".format(step))
+                    utils.makedirs(this_sample_dir)
 
-def setup_stuff(work_dir):
-    sample_dir = os.path.join(work_dir, "samples")
-    checkpoint_dir = os.path.join(work_dir, "checkpoints")
-    checkpoint_meta_dir = os.path.join(work_dir, "checkpoints-meta", "checkpoint.pth")
-    os.makedirs(sample_dir, exist_ok = True)
-    os.makedirs(checkpoint_dir, exist_ok = True)
-    os.makedirs(checkpoint_meta_dir, exist_ok = True)
-    device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
-    return sample_dir, checkpoint_dir, checkpoint_meta_dir, device
+                    self.ema.store(self.score_model.parameters())
+                    self.ema.copy_to(self.score_model.parameters())
+                    sample = self.sampling_fn(self.score_model)
+                    self.ema.restore(self.score_model.parameters())
 
-#def training()
+                    sentences = tokenizer.batch_decode(sample)
+                    
+                    file_name = os.path.join(this_sample_dir, f"sample_{rank}.txt")
+                    with open(file_name, 'w') as file:
+                        for sentence in sentences:
+                            file.write(sentence + "\n")
+                            file.write("============================================================================================\n")
+
+                    if self.cfg.eval.perplexity:
+                        with torch.no_grad():
+                            pass
+
+                        dist.barrier()
+
+                        
+def run_train()
+
+# def setup_stuff(work_dir):
+#     sample_dir = os.path.join(work_dir, "samples")
+#     checkpoint_dir = os.path.join(work_dir, "checkpoints")
+#     checkpoint_meta_dir = os.path.join(work_dir, "checkpoints-meta", "checkpoint.pth")
+#     os.makedirs(sample_dir, exist_ok = True)
+#     os.makedirs(checkpoint_dir, exist_ok = True)
+#     os.makedirs(checkpoint_meta_dir, exist_ok = True)
+#     device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
+#     return sample_dir, checkpoint_dir, checkpoint_meta_dir, device
+
+# #def training()
 
