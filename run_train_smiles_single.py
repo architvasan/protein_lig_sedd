@@ -197,7 +197,25 @@ class Train_pl_sedd:
                         dist.barrier()
 
                         
-def run_train()
+def run_train(
+        work_dir, cfg_fil, plinder_output_dir = './plinder', plinder_data_dir='./plinder', max_samples=200, batch_size=2, num_workers=1, train_ratio=0.8, val_ratio=0.1, max_protein_len=1024, max_ligand_len=128, use_structure=False, seed=42, force_reprocess=False)
+
+    trainer_object= Train_pl_sedd(
+                            work_dir,
+                            cfg_fil,
+                            plinder_output_dir,
+                            plinder_data_dir,
+
+                            max_samples
+                            batch_size
+                            num_workers
+                            train_ratio
+                            val_ratio: int=0.1#args.val_ratio,
+                            max_protein_len: int=1024#args.protein_max_len,
+                            max_ligand_len:int =128#args.mol_max_len,
+                            use_structure:bool =False#args.use_structure,
+                            seed:int=42#args.seed,
+                            force_reprocess:bool=False#args.force_reprocess
 
 # def setup_stuff(work_dir):
 #     sample_dir = os.path.join(work_dir, "samples")
