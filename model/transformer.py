@@ -199,7 +199,7 @@ class EmbeddingLayer(nn.Module):
         super().__init__()
         self.embedding = nn.Parameter(torch.empty((vocab_dim, dim)))
         #torch.nn.init.xavier_uniform_(self.embedding)
-        #torch.nn.init.kaiming_uniform_(self.embedding, a=math.sqrt(5))
+        torch.nn.init.kaiming_uniform_(self.embedding, a=math.sqrt(5))
 
     def forward(self, x):
         print(x.size)
@@ -238,7 +238,7 @@ class SEDD(nn.Module, PyTorchModelHubMixin):
 
         self.absorb = config.graph.type == "absorb"
         vocab_size = config.tokens + (1 if self.absorb else 0)
-
+        print(f"{vocab_size=}")
         self.vocab_embed = EmbeddingLayer(config.model.hidden_size, vocab_size)
         self.sigma_map = TimestepEmbedder(config.model.cond_dim)
         self.rotary_emb = rotary.Rotary(config.model.hidden_size // config.model.n_heads)

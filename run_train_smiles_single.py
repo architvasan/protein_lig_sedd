@@ -24,7 +24,18 @@ from SmilesPE.tokenizer import *
 from updated_data_pipeline import create_improved_data_loaders
 from dataclasses import dataclass
 import yaml
+import inspect
 
+class Config:
+    def __init__(self, dictionary):
+        for key, value in dictionary.items():
+            if isinstance(value, dict):
+                value = Config(value)
+            setattr(self, key, value)
+
+    def __getitem__(self, key):
+        return getattr(self, key)
+    
 @dataclass
 class Train_pl_sedd:
     work_dir: str
@@ -43,10 +54,13 @@ class Train_pl_sedd:
     seed:int=42#args.seed,
     force_reprocess:bool=False#args.force_reprocess
 
-    def __post__init(self):
-        with open(cfg_fil, "r") as f:
-            self.cfg = yaml.safe_load(f)
+    def __post_init__(self):
+        with open(self.cfg_fil, "r") as f:
+            cfg = yaml.safe_load(f)
+        self.cfg = Config(cfg)
 
+        print(self.cfg.training)
+        print(dir(self.cfg))
         self.sample_dir = os.path.join(self.work_dir, "samples")
         self.checkpoint_dir = os.path.join(self.work_dir, "checkpoints")
         self.checkpoint_meta_dir = os.path.join(self.work_dir, "checkpoints-meta", "checkpoint.pth")
@@ -82,7 +96,7 @@ class Train_pl_sedd:
             self,
             ):
         # build token graph
-        graph = graph_lib.get_graph(self.cfg, self.device)
+        self.graph = graph_lib.get_graph(self.cfg, self.device)
         
         # build score model
         self.score_model = SEDD(self.cfg).to(self.device)
@@ -99,8 +113,8 @@ class Train_pl_sedd:
         self.optimizer = losses.get_optimizer(self.cfg, chain(self.score_model.parameters(), self.noise.parameters()))
         print(f"Optimizer: {self.optimizer}")
         self.scaler = torch.cuda.amp.GradScaler()
-        print(f"Scaler: {scaler}")
-        state = dict(optimizer=self.optimizer,
+        print(f"Scaler: {self.scaler}")
+        self.state = dict(optimizer=self.optimizer,
                         scaler=self.scaler,
                         model=self.score_model,
                         noise=self.noise,
@@ -109,96 +123,106 @@ class Train_pl_sedd:
     
     
         # load in state
-        self.state = utils.restore_checkpoint(self.checkpoint_meta_dir, state, self.device)
-        self.initial_step = int(state['step'])
+        #self.state = utils.restore_checkpoint(self.checkpoint_meta_dir, state, self.device)
+        self.initial_step = int(self.state['step'])
 
     def train(self): 
+
+        print(f"{self.cfg.optim.lr=}")
+        self.cfg.optim.lr = float(self.cfg.optim.lr)
+        self.setup_loaders()
+        self.load_model()
+        self.optim_state()
         train_iter = iter(self.train_ds)
         eval_iter = iter(self.eval_ds)
-
+        print(train_iter, eval_iter)
         # Build one-step training and evaluation functions
         optimize_fn = losses.optimization_manager(self.cfg)
         train_step_fn = losses.get_step_fn(self.noise, self.graph, True, optimize_fn, self.cfg.training.accum)
         eval_step_fn = losses.get_step_fn(self.noise, self.graph, False, optimize_fn, self.cfg.training.accum)
+        
+        print(inspect.signature(optimize_fn))
+        print(inspect.signature(train_step_fn))
+        print(inspect.signature(eval_step_fn))
 
         if self.cfg.training.snapshot_sampling:
             sampling_shape = (self.cfg.training.batch_size // (self.cfg.ngpus * self.cfg.training.accum), self.cfg.model.length)
             sampling_fn = sampling.get_sampling_fn(self.cfg, self.graph, self.noise, sampling_shape, self.sampling_eps, self.device)
 
         num_train_steps = self.cfg.training.n_iters
-        print(f"Starting training loop at step {initial_step}.")
+        print(f"Starting training loop at step {self.initial_step}.")
 
         while self.state['step'] < num_train_steps + 1:
             step = self.state['step']
 
 
-        if self.cfg.data.train != "text8":
-            #print(next(train_iter)['ligand_tokens'].to(device))
-            batch = next(train_iter)['ligand_tokens'].to(device)
-        else:
-            batch = next(train_iter).to(device)
+            if self.cfg.data.train != "text8":
+                #print(next(train_iter)['ligand_tokens'].to(device))
+                batch = next(train_iter)['ligand_tokens'].to(self.device)
+            else:
+                batch = next(train_iter).to(self.device)
+                print(batch)
+            loss = train_step_fn(self.state, batch)
+            print(f"{loss=}")
+            # flag to see if there was movement ie a full batch got computed
+            if step != self.state['step']:
+                if step % self.cfg.training.log_freq == 0:
+                    dist.all_reduce(loss)
+                    loss /= world_size
 
-        loss = train_step_fn(self.state, self.batch)
+                    print("step: %d, training_loss: %.5e" % (step, loss.item()))
 
-        # flag to see if there was movement ie a full batch got computed
-        if step != self.state['step']:
-            if step % self.cfg.training.log_freq == 0:
-                dist.all_reduce(loss)
-                loss /= world_size
+                if step % self.cfg.training.snapshot_freq_for_preemption == 0 and rank == 0:
+                    utils.save_checkpoint(self.checkpoint_meta_dir, self.state)
 
-                print("step: %d, training_loss: %.5e" % (step, loss.item()))
+                if step % self.cfg.training.eval_freq == 0:
+                    if self.cfg.data.valid != "text8":
+                        eval_batch = next(eval_iter)['input_ids'].to(self.device)
+                    else:
+                        eval_batch = next(train_iter).to(self.device)
+                    eval_loss = eval_step_fn(self.state, eval_batch)
 
-            if step % self.cfg.training.snapshot_freq_for_preemption == 0 and rank == 0:
-                utils.save_checkpoint(self.checkpoint_meta_dir, self.state)
+                    #dist.all_reduce(eval_loss)
+                    eval_loss /= world_size
 
-            if step % self.cfg.training.eval_freq == 0:
-                if self.cfg.data.valid != "text8":
-                    eval_batch = next(eval_iter)['input_ids'].to(self.device)
-                else:
-                    eval_batch = next(train_iter).to(self.device)
-                eval_loss = eval_step_fn(self.state, eval_batch)
+                    print("step: %d, evaluation_loss: %.5e" % (step, eval_loss.item()))
 
-                dist.all_reduce(eval_loss)
-                eval_loss /= world_size
+                if step > 0 and step % self.cfg.training.snapshot_freq == 0 or step == num_train_steps:
+                    # Save the checkpoint.
+                    save_step = step // self.cfg.training.snapshot_freq
+                    if rank == 0:
+                        utils.save_checkpoint(os.path.join(
+                            self.checkpoint_dir, f'checkpoint_{save_step}.pth'), self.state)
 
-                print("step: %d, evaluation_loss: %.5e" % (step, eval_loss.item()))
+                    # Generate and save samples
+                    if self.cfg.training.snapshot_sampling:
+                        print(f"Generating text at step: {step}")
 
-            if step > 0 and step % self.cfg.training.snapshot_freq == 0 or step == num_train_steps:
-                # Save the checkpoint.
-                save_step = step // self.cfg.training.snapshot_freq
-                if rank == 0:
-                    utils.save_checkpoint(os.path.join(
-                        self.checkpoint_dir, f'checkpoint_{save_step}.pth'), self.state)
+                        this_sample_dir = os.path.join(self.sample_dir, "iter_{}".format(step))
+                        utils.makedirs(this_sample_dir)
 
-                # Generate and save samples
-                if self.cfg.training.snapshot_sampling:
-                    print(f"Generating text at step: {step}")
+                        self.ema.store(self.score_model.parameters())
+                        self.ema.copy_to(self.score_model.parameters())
+                        sample = self.sampling_fn(self.score_model)
+                        self.ema.restore(self.score_model.parameters())
 
-                    this_sample_dir = os.path.join(self.sample_dir, "iter_{}".format(step))
-                    utils.makedirs(this_sample_dir)
+                        sentences = tokenizer.batch_decode(sample)
+                        
+                        file_name = os.path.join(this_sample_dir, f"sample_{rank}.txt")
+                        with open(file_name, 'w') as file:
+                            for sentence in sentences:
+                                file.write(sentence + "\n")
+                                file.write("============================================================================================\n")
 
-                    self.ema.store(self.score_model.parameters())
-                    self.ema.copy_to(self.score_model.parameters())
-                    sample = self.sampling_fn(self.score_model)
-                    self.ema.restore(self.score_model.parameters())
+                        if self.cfg.eval.perplexity:
+                            with torch.no_grad():
+                                pass
 
-                    sentences = tokenizer.batch_decode(sample)
-                    
-                    file_name = os.path.join(this_sample_dir, f"sample_{rank}.txt")
-                    with open(file_name, 'w') as file:
-                        for sentence in sentences:
-                            file.write(sentence + "\n")
-                            file.write("============================================================================================\n")
-
-                    if self.cfg.eval.perplexity:
-                        with torch.no_grad():
-                            pass
-
-                        dist.barrier()
+                            dist.barrier()
 
                         
 def run_train(
-        work_dir, cfg_fil, plinder_output_dir = './plinder', plinder_data_dir='./plinder', max_samples=200, batch_size=2, num_workers=1, train_ratio=0.8, val_ratio=0.1, max_protein_len=1024, max_ligand_len=128, use_structure=False, seed=42, force_reprocess=False)
+        work_dir, cfg_fil, plinder_output_dir = './plinder', plinder_data_dir='./plinder', max_samples=200, batch_size=2, num_workers=1, train_ratio=0.8, val_ratio=0.1, max_protein_len=1024, max_ligand_len=128, use_structure=False, seed=42, force_reprocess=False):
 
     trainer_object= Train_pl_sedd(
                             work_dir,
@@ -217,7 +241,14 @@ def run_train(
                             force_reprocess,
     ) 
 
-    train()
+    trainer_object.train()
+
+
+if __name__=="__main__":
+    work_dir = "/eagle/FoundEpidem/avasan/IDEAL/DiffusionModels/protein_lig_sedd" 
+    cfg_fil = "./configs/config.yaml"
+
+    run_train(work_dir, cfg_fil)
 
 # def setup_stuff(work_dir):
 #     sample_dir = os.path.join(work_dir, "samples")

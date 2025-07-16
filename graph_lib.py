@@ -243,6 +243,7 @@ class Absorbing(Graph):
 
     def score_entropy(self, score, sigma, x, x0):
         rel_ind = x == self.dim - 1
+        print(rel_ind)
         esigm1 = torch.where(
             sigma < 0.5,
             torch.expm1(sigma),

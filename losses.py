@@ -6,7 +6,7 @@ import graph_lib
 from model import utils as mutils
 
 
-def get_loss_fn(noise, graph, train, sampling_eps=1e-3, lv=False):
+def get_loss_fn(noise, graph, train=True, sampling_eps=1e-3, lv=False):
 
     def loss_fn(model, batch, cond=None, t=None, perturbed_batch=None):
         """
@@ -18,16 +18,17 @@ def get_loss_fn(noise, graph, train, sampling_eps=1e-3, lv=False):
                 raise NotImplementedError("Yeah I gotta do this later")
             else:
                 t = (1 - sampling_eps) * torch.rand(batch.shape[0], device=batch.device) + sampling_eps
-            
+        print(f"{t=}")    
         sigma, dsigma = noise(t)
-        
+        print(f"{sigma=}") 
         if perturbed_batch is None:
             perturbed_batch = graph.sample_transition(batch, sigma[:, None])
-
+        print(f"{perturbed_batch=}")
         log_score_fn = mutils.get_score_fn(model, train=train, sampling=False)
         log_score = log_score_fn(perturbed_batch, sigma)
+        print(f"{log_score=}")
         loss = graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
-
+        print(f"{loss=}")
         loss = (dsigma[:, None] * loss).sum(dim=-1)
 
         return loss
@@ -76,14 +77,16 @@ def optimization_manager(config):
 
 def get_step_fn(noise, graph, train, optimize_fn, accum):
     loss_fn = get_loss_fn(noise, graph, train)
-
+    print(loss_fn)
     accum_iter = 0
     total_loss = 0
 
     def step_fn(state, batch, cond=None):
-        nonlocal accum_iter 
-        nonlocal total_loss
-
+        #nonlocal accum_iter 
+        #nonlocal total_loss
+        
+        accum_iter = 0
+        total_loss = 0
         model = state['model']
 
         if train:

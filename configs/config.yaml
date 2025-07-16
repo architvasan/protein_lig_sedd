@@ -1,5 +1,16 @@
 work_dir: /eagle/FoundEpidem/avasan/IDEAL/DiffusionModels/protein_lig_sedd
 
+model:
+  name: tiny           
+  type: ddit
+  hidden_size: 768
+  cond_dim: 128
+  length: 128
+  n_blocks: 8
+  n_heads: 8
+  scale_by_sigma: True
+  dropout: 0.1
+
 defaults:
   - _self_
   - model: tiny
@@ -31,7 +42,7 @@ graph:
 
 noise:
   type: loglinear
-  sigma_min: 1e-4
+  sigma_min: !!float "1e-4"
   sigma_max: 20
 
 sampling:
@@ -47,10 +58,10 @@ eval:
 optim:
   weight_decay: 0
   optimizer: AdamW
-  lr: 3e-4
+  lr: !!float "3e-4"
   beta1: 0.9
   beta2: 0.999
-  eps: 1e-8
+  eps: !!float "1e-8"
   warmup: 1_000
   grad_clip: 1.
 
