@@ -205,17 +205,19 @@ def run_train(
                             cfg_fil,
                             plinder_output_dir,
                             plinder_data_dir,
+                            max_samples,
+                            batch_size,
+                            num_workers,
+                            train_ratio,
+                            val_ratio,
+                            max_protein_len,
+                            max_ligand_len,
+                            use_structure,
+                            seed,
+                            force_reprocess,
+    ) 
 
-                            max_samples
-                            batch_size
-                            num_workers
-                            train_ratio
-                            val_ratio: int=0.1#args.val_ratio,
-                            max_protein_len: int=1024#args.protein_max_len,
-                            max_ligand_len:int =128#args.mol_max_len,
-                            use_structure:bool =False#args.use_structure,
-                            seed:int=42#args.seed,
-                            force_reprocess:bool=False#args.force_reprocess
+    train()
 
 # def setup_stuff(work_dir):
 #     sample_dir = os.path.join(work_dir, "samples")
