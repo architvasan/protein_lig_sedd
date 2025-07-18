@@ -21,11 +21,11 @@ tokens: 36 #25
 training:
   batch_size: 4
   accum: 1
-  n_iters: 100 #10_000
-  snapshot_freq: 100 #1_000
+  n_iters: 200 #10_000
+  snapshot_freq: 200 #1_000
   log_freq: 50
-  eval_freq: 50
-  snapshot_freq_for_preemption: 100
+  eval_freq: 25
+  snapshot_freq_for_preemption: 200
   weight: standard
   snapshot_sampling: True
   ema: 0.9999
@@ -47,7 +47,7 @@ noise:
 
 sampling:
   predictor: euler
-  steps: 100
+  steps: 25
   noise_removal: True
 
 eval:

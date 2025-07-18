@@ -27,7 +27,6 @@ import yaml
 import inspect
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
-
 class Config:
     def __init__(self, dictionary):
         for key, value in dictionary.items():
@@ -185,12 +184,12 @@ class Train_pl_sedd:
                     else:
                         eval_batch = next(train_iter).to(self.device)
 
-                    #eval_loss = eval_step_fn(self.state, eval_batch)
+                    eval_loss = eval_step_fn(self.state, eval_batch)
 
                     #dist.all_reduce(eval_loss)
                     #eval_loss /= world_size
 
-                    #print("step: %d, evaluation_loss: %.5e" % (step, eval_loss.item()))
+                    print("step: %d, evaluation_loss: %.5e" % (step, eval_loss.item()))
 
                 if step > 0 and step % self.cfg.training.snapshot_freq == 0 or step == num_train_steps:
                     # Save the checkpoint.
@@ -213,7 +212,7 @@ class Train_pl_sedd:
 
                         vocab_tok_smiles = list("CNOSPFBrClI()[]+=\\#-@:123456789%/c.nsop")
                         sentences = [vocab_tok_smiles[i_v] for i_v in sample[0]]#self.tokenizer.batch_decode(sample)
-                        
+                        print(sentences) 
                         file_name = os.path.join(this_sample_dir, f"sample_.txt")
                         with open(file_name, 'w') as file:
                             for sentence in sentences:
