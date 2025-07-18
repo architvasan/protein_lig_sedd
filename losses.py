@@ -18,12 +18,12 @@ def get_loss_fn(noise, graph, train=True, sampling_eps=1e-3, lv=False):
                 raise NotImplementedError("Yeah I gotta do this later")
             else:
                 t = (1 - sampling_eps) * torch.rand(batch.shape[0], device=batch.device) + sampling_eps
-        print(f"{t=}")    
+        #print(f"{t=}")    
         sigma, dsigma = noise(t)
-        print(f"{sigma=}") 
+        #print(f"{sigma=}") 
         if perturbed_batch is None:
             perturbed_batch = graph.sample_transition(batch, sigma[:, None])
-        print(f"{perturbed_batch=}")
+        #print(f"{perturbed_batch=}")
         log_score_fn = mutils.get_score_fn(model, train=train, sampling=False)
         log_score = log_score_fn(perturbed_batch, sigma)
         #print(f"{log_score=}")
@@ -77,7 +77,7 @@ def optimization_manager(config):
 
 def get_step_fn(noise, graph, train, optimize_fn, accum):
     loss_fn = get_loss_fn(noise, graph, train)
-    print(loss_fn)
+    #print(loss_fn)
     accum_iter = 0
     total_loss = 0
 

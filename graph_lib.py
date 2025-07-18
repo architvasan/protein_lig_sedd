@@ -242,10 +242,10 @@ class Absorbing(Graph):
         return (self.dim - 1) * torch.ones(*batch_dims, dtype=torch.int64)
 
     def score_entropy(self, score, sigma, x, x0):
-        print(x)
-        print(x0)
+        #print(x)
+        #print(x0)
         rel_ind = x == self.dim - 1
-        print(f"{rel_ind=}")
+        #print(f"{rel_ind=}")
         esigm1 = torch.where(
             sigma < 0.5,
             torch.expm1(sigma),
@@ -262,11 +262,11 @@ class Absorbing(Graph):
 
         # negative_term
         pos_term = score[rel_ind][:, :-1].exp().sum(dim=-1)
-        print("score[rel_ind].shape:", score[rel_ind].shape)
-        print("other_ind.shape:", other_ind.shape)
-        print("Max of other_ind:", other_ind.max().item())
-        print("Min of other_ind:", other_ind.min().item())
-        print("Last dim of score[rel_ind]:", score[rel_ind].shape[-1])
+        #print("score[rel_ind].shape:", score[rel_ind].shape)
+        #print("other_ind.shape:", other_ind.shape)
+        #print("Max of other_ind:", other_ind.max().item())
+        #print("Min of other_ind:", other_ind.min().item())
+        #print("Last dim of score[rel_ind]:", score[rel_ind].shape[-1])
 
         #neg_term = ratio * torch.gather(score[rel_ind], -1, other_ind[..., None]).squeeze(-1)
         #print(neg_term)
