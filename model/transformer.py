@@ -207,12 +207,12 @@ class EmbeddingLayer(nn.Module):
         torch.nn.init.kaiming_uniform_(self.embedding, a=math.sqrt(5))
 
     def forward(self, x):
-        print(self.embedding)
-        print(x.size)
-        print("x.shape:", x.shape)
-        print("x.min():", x.min().item())
-        print("x.max():", x.max().item())
-        print("embedding.num_embeddings:", self.embedding.num_embeddings)
+        #print(self.embedding)
+        #print(x.size)
+        #print("x.shape:", x.shape)
+        #print("x.min():", x.min().item())
+        #print("x.max():", x.max().item())
+        #print("embedding.num_embeddings:", self.embedding.num_embeddings)
         return self.embedding[x]
 
 

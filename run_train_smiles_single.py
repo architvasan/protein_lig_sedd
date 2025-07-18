@@ -44,6 +44,7 @@ class Train_pl_sedd:
     plinder_output_dir: str='./plinder'
     plinder_data_dir:str ='./plinder'
 
+    epochs: int=10
     max_samples:int =200
     batch_size: int =2
     num_workers: int=1
@@ -152,88 +153,91 @@ class Train_pl_sedd:
 
         num_train_steps = self.cfg.training.n_iters
         print(f"Starting training loop at step {self.initial_step}.")
+        print(self.epochs)
+        for ep in range(self.epochs):
+            while self.state['step'] < num_train_steps + 1:
+                step = self.state['step']
 
-        while self.state['step'] < num_train_steps + 1:
-            step = self.state['step']
 
+                if self.cfg.data.train != "text8":
+                    #print(next(train_iter)['ligand_tokens'].to(device))
+                    batch = next(train_iter)['ligand_tokens'].to(self.device)
+                else:
+                    batch = next(train_iter).to(self.device)
+                    #print(batch)
+                loss = train_step_fn(self.state, batch)
+                #print(f"{loss=}")
+                # flag to see if there was movement ie a full batch got computed
+                if step != self.state['step']:
+                    if step % self.cfg.training.log_freq == 0:
+                        #dist.all_reduce(loss)
+                        #loss /= world_size
 
-            if self.cfg.data.train != "text8":
-                #print(next(train_iter)['ligand_tokens'].to(device))
-                batch = next(train_iter)['ligand_tokens'].to(self.device)
-            else:
-                batch = next(train_iter).to(self.device)
-                #print(batch)
-            loss = train_step_fn(self.state, batch)
-            print(f"{loss=}")
-            # flag to see if there was movement ie a full batch got computed
-            if step != self.state['step']:
-                if step % self.cfg.training.log_freq == 0:
-                    #dist.all_reduce(loss)
-                    #loss /= world_size
+                        print("epoch: %d, step: %d, training_loss: %.5e" % (ep, step, loss.item()))
 
-                    print("step: %d, training_loss: %.5e" % (step, loss.item()))
+                    if step % self.cfg.training.snapshot_freq_for_preemption == 0 :
+                        utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check.pth', self.state)
 
-                if step % self.cfg.training.snapshot_freq_for_preemption == 0 :
-                    utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check.pth', self.state)
+                    
+                    if step % self.cfg.training.eval_freq == 0:
+                        if self.cfg.data.valid != "text8":
+                            #print(next(eval_iter))
+                            eval_batch = next(eval_iter)['ligand_tokens'].to(self.device)
+                        else:
+                            eval_batch = next(train_iter).to(self.device)
 
-                
-                if step % self.cfg.training.eval_freq == 0:
-                    if self.cfg.data.valid != "text8":
-                        #print(next(eval_iter))
-                        eval_batch = next(eval_iter)['ligand_tokens'].to(self.device)
-                    else:
-                        eval_batch = next(train_iter).to(self.device)
+                        eval_loss = eval_step_fn(self.state, eval_batch)
 
-                    eval_loss = eval_step_fn(self.state, eval_batch)
+                        #dist.all_reduce(eval_loss)
+                        #eval_loss /= world_size
 
-                    #dist.all_reduce(eval_loss)
-                    #eval_loss /= world_size
+                        print("epoch: %d, step: %d, evaluation_loss: %.5e" % (ep, step, eval_loss.item()))
 
-                    print("step: %d, evaluation_loss: %.5e" % (step, eval_loss.item()))
+                    if step > 0 and step % self.cfg.training.snapshot_freq == 0 or step == num_train_steps:
+                        # Save the checkpoint.
+                        save_step = step // self.cfg.training.snapshot_freq
+                        if True:
+                            utils.save_checkpoint(os.path.join(
+                                self.checkpoint_dir, f'checkpoint_{save_step}.pth'), self.state)
 
-                if step > 0 and step % self.cfg.training.snapshot_freq == 0 or step == num_train_steps:
-                    # Save the checkpoint.
-                    save_step = step // self.cfg.training.snapshot_freq
-                    if True:
-                        utils.save_checkpoint(os.path.join(
-                            self.checkpoint_dir, f'checkpoint_{save_step}.pth'), self.state)
+                        # Generate and save samples
+                        if self.cfg.training.snapshot_sampling:
+                            print(f"Generating text at step: {step}")
 
-                    # Generate and save samples
-                    if self.cfg.training.snapshot_sampling:
-                        print(f"Generating text at step: {step}")
+                            this_sample_dir = os.path.join(self.sample_dir, "iter_{}".format(step))
+                            utils.makedirs(this_sample_dir)
 
-                        this_sample_dir = os.path.join(self.sample_dir, "iter_{}".format(step))
-                        utils.makedirs(this_sample_dir)
+                            self.ema.store(self.score_model.parameters())
+                            self.ema.copy_to(self.score_model.parameters())
+                            sample = self.sampling_fn(self.score_model)
+                            self.ema.restore(self.score_model.parameters())
 
-                        self.ema.store(self.score_model.parameters())
-                        self.ema.copy_to(self.score_model.parameters())
-                        sample = self.sampling_fn(self.score_model)
-                        self.ema.restore(self.score_model.parameters())
+                            vocab_tok_smiles = list("CNOSPFBrClI()[]+=\\#-@:123456789%/c.nsop")
+                            sentences = [vocab_tok_smiles[i_v] for i_v in sample[0]]#self.tokenizer.batch_decode(sample)
+                            print(''.join(sentences))
+                            #print(sentences) 
+                            file_name = os.path.join(this_sample_dir, f"sample_.txt")
+                            with open(file_name, 'w') as file:
+                                for sentence in sentences:
+                                    file.write(sentence + "\n")
+                                    file.write("============================================================================================\n")
 
-                        vocab_tok_smiles = list("CNOSPFBrClI()[]+=\\#-@:123456789%/c.nsop")
-                        sentences = [vocab_tok_smiles[i_v] for i_v in sample[0]]#self.tokenizer.batch_decode(sample)
-                        print(sentences) 
-                        file_name = os.path.join(this_sample_dir, f"sample_.txt")
-                        with open(file_name, 'w') as file:
-                            for sentence in sentences:
-                                file.write(sentence + "\n")
-                                file.write("============================================================================================\n")
+                            if self.cfg.eval.perplexity:
+                                with torch.no_grad():
+                                    pass
 
-                        if self.cfg.eval.perplexity:
-                            with torch.no_grad():
-                                pass
-
-                            #dist.barrier()
+                                #dist.barrier()
 
                         
 def run_train(
-        work_dir, cfg_fil, plinder_output_dir = './plinder', plinder_data_dir='./plinder', max_samples=200, batch_size=2, num_workers=1, train_ratio=0.8, val_ratio=0.1, max_protein_len=1024, max_ligand_len=128, use_structure=False, seed=42, force_reprocess=False):
+        work_dir, cfg_fil, plinder_output_dir = './plinder', plinder_data_dir='./plinder', epochs=10, max_samples=200, batch_size=2, num_workers=1, train_ratio=0.8, val_ratio=0.1, max_protein_len=1024, max_ligand_len=128, use_structure=False, seed=42, force_reprocess=False):
 
     trainer_object= Train_pl_sedd(
                             work_dir,
                             cfg_fil,
                             plinder_output_dir,
                             plinder_data_dir,
+                            epochs,
                             max_samples,
                             batch_size,
                             num_workers,

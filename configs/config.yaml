@@ -16,7 +16,7 @@ defaults:
   - model: tiny
 
 ngpus: 1
-tokens: 36 #25
+tokens: 39 #25
 
 training:
   batch_size: 4
