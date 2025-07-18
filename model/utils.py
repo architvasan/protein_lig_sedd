@@ -31,8 +31,8 @@ def get_model_fn(model, train=False):
             model.eval()
         
             # otherwise output the raw values (we handle mlm training in losses.py)
-        print(x, sigma)
-        print(model)
+        #print(x, sigma)
+        #print(model)
         return model(x, sigma)
 
     return model_fn

@@ -26,9 +26,9 @@ def get_loss_fn(noise, graph, train=True, sampling_eps=1e-3, lv=False):
         print(f"{perturbed_batch=}")
         log_score_fn = mutils.get_score_fn(model, train=train, sampling=False)
         log_score = log_score_fn(perturbed_batch, sigma)
-        print(f"{log_score=}")
+        #print(f"{log_score=}")
         loss = graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
-        print(f"{loss=}")
+        #print(f"{loss=}")
         loss = (dsigma[:, None] * loss).sum(dim=-1)
 
         return loss

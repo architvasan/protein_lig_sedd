@@ -27,3 +27,4 @@ plinder/
 plinder_OLD/
 run_train_smiles.err
 train_smiles.err
+test_smiles_single.err

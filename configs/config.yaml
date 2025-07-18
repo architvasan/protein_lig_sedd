@@ -5,7 +5,7 @@ model:
   type: ddit
   hidden_size: 768
   cond_dim: 128
-  length: 128
+  length: 36 #128
   n_blocks: 8
   n_heads: 8
   scale_by_sigma: True
@@ -16,7 +16,7 @@ defaults:
   - model: tiny
 
 ngpus: 1
-tokens: 25
+tokens: 36 #25
 
 training:
   batch_size: 4

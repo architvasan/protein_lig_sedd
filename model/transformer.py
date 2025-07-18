@@ -197,12 +197,22 @@ class EmbeddingLayer(nn.Module):
         2-> add in eigenvectors, 3 -> use pretrained embedding matrix
         """
         super().__init__()
-        self.embedding = nn.Parameter(torch.empty((vocab_dim, dim)))
+
+        #self.embedding = nn.Embedding(37, dim)#vocab_dim + 1, dim)
+        # Optionally initialize manually
+        #torch.nn.init.kaiming_uniform_(self.embedding.weight, a=math.sqrt(5))
+
+        self.embedding = nn.Parameter(torch.empty((vocab_dim, dim)))#(vocab_dim+1, dim)))
         #torch.nn.init.xavier_uniform_(self.embedding)
         torch.nn.init.kaiming_uniform_(self.embedding, a=math.sqrt(5))
 
     def forward(self, x):
-        print(x.size)
+        #print(self.embedding)
+        #print(x.size)
+        #print("x.shape:", x.shape)
+        #print("x.min():", x.min().item())
+        #print("x.max():", x.max().item())
+        #print("embedding.num_embeddings:", self.embedding.num_embeddings)
         return self.embedding[x]
 
 
@@ -238,7 +248,7 @@ class SEDD(nn.Module, PyTorchModelHubMixin):
 
         self.absorb = config.graph.type == "absorb"
         vocab_size = config.tokens + (1 if self.absorb else 0)
-        print(f"{vocab_size=}")
+        #print(f"{vocab_size=}")
         self.vocab_embed = EmbeddingLayer(config.model.hidden_size, vocab_size)
         self.sigma_map = TimestepEmbedder(config.model.cond_dim)
         self.rotary_emb = rotary.Rotary(config.model.hidden_size // config.model.n_heads)
@@ -261,7 +271,7 @@ class SEDD(nn.Module, PyTorchModelHubMixin):
 
     def forward(self, indices, sigma):
 
-        print(indices.size)
+        #print(indices.size)
         x = self.vocab_embed(indices)
         c = F.silu(self.sigma_map(sigma))
 
@@ -279,6 +289,11 @@ class SEDD(nn.Module, PyTorchModelHubMixin):
             esigm1_log = torch.where(sigma < 0.5, torch.expm1(sigma), sigma.exp() - 1).log().to(x.dtype)[:, None, None]
             x = x - esigm1_log - np.log(x.shape[-1] - 1)# this will be approximately averaged at 0
             
+        #print("x.shape:", x.shape)
+        #print("indices.shape:", indices.shape)
+        #print("indices.max():", indices.max().item())
+        #print("x.shape[-1]:", x.shape[-1])
         x = torch.scatter(x, -1, indices[..., None], torch.zeros_like(x[..., :1]))
+        #x = x.index_fill(-1, indices, 0)  # only works if indices are flat and dim matches
 
         return x

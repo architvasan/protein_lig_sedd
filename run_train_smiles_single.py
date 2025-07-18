@@ -25,6 +25,8 @@ from updated_data_pipeline import create_improved_data_loaders
 from dataclasses import dataclass
 import yaml
 import inspect
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
 
 class Config:
     def __init__(self, dictionary):
@@ -59,8 +61,8 @@ class Train_pl_sedd:
             cfg = yaml.safe_load(f)
         self.cfg = Config(cfg)
 
-        print(self.cfg.training)
-        print(dir(self.cfg))
+        #print(self.cfg.training)
+        #print(dir(self.cfg))
         self.sample_dir = os.path.join(self.work_dir, "samples")
         self.checkpoint_dir = os.path.join(self.work_dir, "checkpoints")
         self.checkpoint_meta_dir = os.path.join(self.work_dir, "checkpoints-meta", "checkpoint.pth")
@@ -111,9 +113,9 @@ class Train_pl_sedd:
     
         # build optimization state
         self.optimizer = losses.get_optimizer(self.cfg, chain(self.score_model.parameters(), self.noise.parameters()))
-        print(f"Optimizer: {self.optimizer}")
+        #print(f"Optimizer: {self.optimizer}")
         self.scaler = torch.cuda.amp.GradScaler()
-        print(f"Scaler: {self.scaler}")
+        #print(f"Scaler: {self.scaler}")
         self.state = dict(optimizer=self.optimizer,
                         scaler=self.scaler,
                         model=self.score_model,
@@ -128,26 +130,26 @@ class Train_pl_sedd:
 
     def train(self): 
 
-        print(f"{self.cfg.optim.lr=}")
+        #print(f"{self.cfg.optim.lr=}")
         self.cfg.optim.lr = float(self.cfg.optim.lr)
         self.setup_loaders()
         self.load_model()
         self.optim_state()
         train_iter = iter(self.train_ds)
         eval_iter = iter(self.eval_ds)
-        print(train_iter, eval_iter)
+        #print(train_iter, eval_iter)
         # Build one-step training and evaluation functions
         optimize_fn = losses.optimization_manager(self.cfg)
         train_step_fn = losses.get_step_fn(self.noise, self.graph, True, optimize_fn, self.cfg.training.accum)
         eval_step_fn = losses.get_step_fn(self.noise, self.graph, False, optimize_fn, self.cfg.training.accum)
         
-        print(inspect.signature(optimize_fn))
-        print(inspect.signature(train_step_fn))
-        print(inspect.signature(eval_step_fn))
-
+        #print(inspect.signature(optimize_fn))
+        #print(inspect.signature(train_step_fn))
+        #print(inspect.signature(eval_step_fn))
+#
         if self.cfg.training.snapshot_sampling:
             sampling_shape = (self.cfg.training.batch_size // (self.cfg.ngpus * self.cfg.training.accum), self.cfg.model.length)
-            sampling_fn = sampling.get_sampling_fn(self.cfg, self.graph, self.noise, sampling_shape, self.sampling_eps, self.device)
+            self.sampling_fn = sampling.get_sampling_fn(self.cfg, self.graph, self.noise, sampling_shape, self.sampling_eps, self.device)
 
         num_train_steps = self.cfg.training.n_iters
         print(f"Starting training loop at step {self.initial_step}.")
@@ -161,36 +163,39 @@ class Train_pl_sedd:
                 batch = next(train_iter)['ligand_tokens'].to(self.device)
             else:
                 batch = next(train_iter).to(self.device)
-                print(batch)
+                #print(batch)
             loss = train_step_fn(self.state, batch)
             print(f"{loss=}")
             # flag to see if there was movement ie a full batch got computed
             if step != self.state['step']:
                 if step % self.cfg.training.log_freq == 0:
-                    dist.all_reduce(loss)
-                    loss /= world_size
+                    #dist.all_reduce(loss)
+                    #loss /= world_size
 
                     print("step: %d, training_loss: %.5e" % (step, loss.item()))
 
-                if step % self.cfg.training.snapshot_freq_for_preemption == 0 and rank == 0:
-                    utils.save_checkpoint(self.checkpoint_meta_dir, self.state)
+                if step % self.cfg.training.snapshot_freq_for_preemption == 0 :
+                    utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check.pth', self.state)
 
+                
                 if step % self.cfg.training.eval_freq == 0:
                     if self.cfg.data.valid != "text8":
-                        eval_batch = next(eval_iter)['input_ids'].to(self.device)
+                        #print(next(eval_iter))
+                        eval_batch = next(eval_iter)['ligand_tokens'].to(self.device)
                     else:
                         eval_batch = next(train_iter).to(self.device)
-                    eval_loss = eval_step_fn(self.state, eval_batch)
+
+                    #eval_loss = eval_step_fn(self.state, eval_batch)
 
                     #dist.all_reduce(eval_loss)
-                    eval_loss /= world_size
+                    #eval_loss /= world_size
 
-                    print("step: %d, evaluation_loss: %.5e" % (step, eval_loss.item()))
+                    #print("step: %d, evaluation_loss: %.5e" % (step, eval_loss.item()))
 
                 if step > 0 and step % self.cfg.training.snapshot_freq == 0 or step == num_train_steps:
                     # Save the checkpoint.
                     save_step = step // self.cfg.training.snapshot_freq
-                    if rank == 0:
+                    if True:
                         utils.save_checkpoint(os.path.join(
                             self.checkpoint_dir, f'checkpoint_{save_step}.pth'), self.state)
 
@@ -206,9 +211,10 @@ class Train_pl_sedd:
                         sample = self.sampling_fn(self.score_model)
                         self.ema.restore(self.score_model.parameters())
 
-                        sentences = tokenizer.batch_decode(sample)
+                        vocab_tok_smiles = list("CNOSPFBrClI()[]+=\\#-@:123456789%/c.nsop")
+                        sentences = [vocab_tok_smiles[i_v] for i_v in sample[0]]#self.tokenizer.batch_decode(sample)
                         
-                        file_name = os.path.join(this_sample_dir, f"sample_{rank}.txt")
+                        file_name = os.path.join(this_sample_dir, f"sample_.txt")
                         with open(file_name, 'w') as file:
                             for sentence in sentences:
                                 file.write(sentence + "\n")
@@ -218,7 +224,7 @@ class Train_pl_sedd:
                             with torch.no_grad():
                                 pass
 
-                            dist.barrier()
+                            #dist.barrier()
 
                         
 def run_train(
