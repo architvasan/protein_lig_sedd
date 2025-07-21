@@ -128,7 +128,7 @@ class Train_pl_sedd:
         #self.state = utils.restore_checkpoint(self.checkpoint_meta_dir, state, self.device)
         self.initial_step = int(self.state['step'])
 
-    def train(self): 
+    def _train(self): 
 
         #print(f"{self.cfg.optim.lr=}")
         self.cfg.optim.lr = float(self.cfg.optim.lr)
@@ -155,15 +155,18 @@ class Train_pl_sedd:
         print(f"Starting training loop at step {self.initial_step}.")
         print(self.epochs)
         for ep in range(self.epochs):
-            while self.state['step'] < num_train_steps + 1:
-                step = self.state['step']
-
+            for b in train_iter:
+            #while self.state['step'] < num_train_steps + 1: ##OLD
+                step = self.state['step'] ##OLD
+                self.state['step']+=1 ## NEW
 
                 if self.cfg.data.train != "text8":
                     #print(next(train_iter)['ligand_tokens'].to(device))
-                    batch = next(train_iter)['ligand_tokens'].to(self.device)
+                    #batch = next(train_iter)['ligand_tokens'].to(self.device) ##OLD
+                    batch = b['ligand_tokens'].to(self.device) ##NEW
                 else:
-                    batch = next(train_iter).to(self.device)
+                    #batch = next(train_iter).to(self.device) ##OLD
+                    batch = b.to(self.device) ##NEW
                     #print(batch)
                 loss = train_step_fn(self.state, batch)
                 #print(f"{loss=}")
@@ -184,7 +187,7 @@ class Train_pl_sedd:
                             #print(next(eval_iter))
                             eval_batch = next(eval_iter)['ligand_tokens'].to(self.device)
                         else:
-                            eval_batch = next(train_iter).to(self.device)
+                            eval_batch = next(eval_iter).to(self.device)
 
                         eval_loss = eval_step_fn(self.state, eval_batch)
 
@@ -227,10 +230,97 @@ class Train_pl_sedd:
                                     pass
 
                                 #dist.barrier()
-
+                    #if step>=num_train_steps# *(ep+1):
+                    #    break
                         
+    def train(self): 
+        self.cfg.optim.lr = float(self.cfg.optim.lr)
+        self.setup_loaders()
+        self.load_model()
+        self.optim_state()
+
+        optimize_fn = losses.optimization_manager(self.cfg)
+        train_step_fn = losses.get_step_fn(self.noise, self.graph, True, optimize_fn, self.cfg.training.accum)
+        eval_step_fn = losses.get_step_fn(self.noise, self.graph, False, optimize_fn, self.cfg.training.accum)
+
+        if self.cfg.training.snapshot_sampling:
+            sampling_shape = (self.cfg.training.batch_size // (self.cfg.ngpus * self.cfg.training.accum), self.cfg.model.length)
+            self.sampling_fn = sampling.get_sampling_fn(self.cfg, self.graph, self.noise, sampling_shape, self.sampling_eps, self.device)
+
+        num_train_steps = self.cfg.training.n_iters
+        print(f"Starting training loop at step {self.initial_step}.")
+        print(f"Training for {self.epochs} epochs or {num_train_steps} steps.")
+
+        step = self.state['step']
+        for ep in range(self.epochs):
+            train_iter = iter(self.train_ds)  # Reset iterator at start of epoch
+            while True:
+                if step >= num_train_steps:
+                    print(f"Reached max training steps: {num_train_steps}. Ending training.")
+                    return  # Exit training early
+
+                try:
+                    if self.cfg.data.train != "text8":
+                        batch = next(train_iter)['ligand_tokens'].to(self.device)
+                    else:
+                        batch = next(train_iter).to(self.device)
+                except StopIteration:
+                    # End of dataset for this epoch
+                    break
+
+                loss = train_step_fn(self.state, batch)
+                step = self.state['step']
+
+                # Logging and checkpointing
+                if step % self.cfg.training.log_freq == 0:
+                    print(f"epoch: {ep}, step: {step}, training_loss: {loss.item():.5e}")
+
+                if step % self.cfg.training.snapshot_freq_for_preemption == 0:
+                    utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check.pth', self.state)
+
+                if step % self.cfg.training.eval_freq == 0:
+                    eval_iter = iter(self.eval_ds)
+                    try:
+                        if self.cfg.data.valid != "text8":
+                            eval_batch = next(eval_iter)['ligand_tokens'].to(self.device)
+                        else:
+                            eval_batch = next(eval_iter).to(self.device)
+                    except StopIteration:
+                        # Handle empty eval set or re-init if needed
+                        eval_batch = None
+
+                    if eval_batch is not None:
+                        eval_loss = eval_step_fn(self.state, eval_batch)
+                        print(f"epoch: {ep}, step: {step}, evaluation_loss: {eval_loss.item():.5e}")
+
+                if (step > 0 and step % self.cfg.training.snapshot_freq == 0) or step == num_train_steps:
+                    save_step = step // self.cfg.training.snapshot_freq
+                    utils.save_checkpoint(os.path.join(self.checkpoint_dir, f'checkpoint_{save_step}.pth'), self.state)
+
+                    if self.cfg.training.snapshot_sampling:
+                        print(f"Generating samples at step: {step}")
+                        this_sample_dir = os.path.join(self.sample_dir, f"iter_{step}")
+                        utils.makedirs(this_sample_dir)
+
+                        self.ema.store(self.score_model.parameters())
+                        self.ema.copy_to(self.score_model.parameters())
+                        sample = self.sampling_fn(self.score_model)
+                        self.ema.restore(self.score_model.parameters())
+
+                        vocab_tok_smiles = list("CNOSPFBrClI()[]+=\\#-@:123456789%/c.nsop")
+                        sentences = [vocab_tok_smiles[i_v] for i_v in sample[0]]
+                        print(''.join(sentences))
+
+                        file_name = os.path.join(this_sample_dir, "sample_.txt")
+                        with open(file_name, 'w') as file:
+                            for sentence in sentences:
+                                file.write(sentence + "\n")
+                                file.write("=" * 92 + "\n")
+
+
+
 def run_train(
-        work_dir, cfg_fil, plinder_output_dir = './plinder', plinder_data_dir='./plinder', epochs=10, max_samples=200, batch_size=2, num_workers=1, train_ratio=0.8, val_ratio=0.1, max_protein_len=1024, max_ligand_len=128, use_structure=False, seed=42, force_reprocess=False):
+        work_dir, cfg_fil, plinder_output_dir = './plinder', plinder_data_dir='./plinder', epochs=10, max_samples=10000, batch_size=2, num_workers=1, train_ratio=0.8, val_ratio=0.1, max_protein_len=1024, max_ligand_len=128, use_structure=False, seed=42, force_reprocess=False):
 
     trainer_object= Train_pl_sedd(
                             work_dir,

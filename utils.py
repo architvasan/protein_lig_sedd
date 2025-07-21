@@ -61,7 +61,7 @@ def restore_checkpoint(ckpt_dir, state, device):
 
 
 def save_checkpoint(ckpt_dir, state):
-    print(state)
+    #print(state)
     saved_state = {
         'optimizer': state['optimizer'].state_dict(),
         'model': state['model'].state_dict(),#modules.

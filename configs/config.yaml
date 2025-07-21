@@ -3,7 +3,7 @@ work_dir: /eagle/FoundEpidem/avasan/IDEAL/DiffusionModels/protein_lig_sedd
 model:
   name: tiny           
   type: ddit
-  hidden_size: 768
+  hidden_size: 1024 #768
   cond_dim: 128
   length: 36 #128
   n_blocks: 8
@@ -21,10 +21,10 @@ tokens: 39 #25
 training:
   batch_size: 4
   accum: 1
-  n_iters: 200 #10_000
+  n_iters: 10000 #10_000
   snapshot_freq: 200 #1_000
   log_freq: 50
-  eval_freq: 25
+  eval_freq: 200
   snapshot_freq_for_preemption: 200
   weight: standard
   snapshot_sampling: True
@@ -51,7 +51,7 @@ sampling:
   noise_removal: True
 
 eval:
-  batch_size: 4
+  batch_size: 25
   perplexity: True
   perplexity_batch_size: 4
 
