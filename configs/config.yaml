@@ -21,6 +21,11 @@ tokens: 39 #25
 training:
   batch_size: 4
   accum: 1
+  epochs: 10
+  max_samples: 10000
+  num_workers: 1
+  seed: 42
+  force_reprocess: False
   n_iters: 10000 #10_000
   snapshot_freq: 200 #1_000
   log_freq: 50
@@ -34,6 +39,11 @@ data:
   train: acyp
   valid: acyp
   cache_dir: data
+  train_ratio: 0.8
+  val_ratio: 0.8
+  max_protein_len: 1024
+  max_ligand_len: 128
+  use_structure: False
 
 graph:
   type: absorb
