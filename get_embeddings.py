@@ -16,13 +16,13 @@ N = 8
 smiles_list = [sample['ligand_smiles'] for sample in data[:N]]
 protein_seq_list = [sample['protein_seq'] for sample in data[:N]]
 
-#Tokenize ligands
+#Tokenize ligands & get embeddings
 mol_inputs = mol_tokenizer(smiles_list, padding=True, return_tensors="pt")
 with torch.no_grad():
     mol_outputs = mol_model(**mol_inputs)
 mol_embeddings = mol_outputs.last_hidden_state #(batch, seq_len, hidden)
 
-#Tokenize proteins
+#Tokenize proteins & get embeddings
 protein_inputs = protein_tokenizer(protein_seq_list, padding=True, return_tensors="pt")
 with torch.no_grad():
     protein_outputs = protein_model(**protein_inputs)
@@ -32,10 +32,6 @@ print("Mol embeddings shape:", mol_embeddings.shape)
 print("Protein embeddings shape:", protein_embeddings.shape)
 print(mol_embeddings)
 print(protein_embeddings)
-
-
-
-
 
 
 ''' 
@@ -52,5 +48,8 @@ ESM2 150M Embedding Shape:
 - So sequence length up to 1026 & vocab size is 33 tokens
 '''
 
+# MolFormer Model: https://huggingface.co/ibm-research/MoLFormer-XL-both-10pct 
+# ESM2 Model: https://huggingface.co/facebook/esm2_t30_150M_UR50D 
 # ESM2 Embedding Extraction example: https://www.kaggle.com/code/viktorfairuschin/extracting-esm-2-embeddings-from-fasta-files/notebook
+
 
