@@ -235,8 +235,87 @@ class DDitFinalLayer(nn.Module):
         x = self.linear(x)
         return x
 
-
 class SEDD(nn.Module, PyTorchModelHubMixin):
+    def __init__(self, config):
+        super().__init__()
+
+        # hack to make loading in configs easier
+        if type(config) == dict:
+            config = OmegaConf.create(config)
+
+        self.config = config
+
+        self.absorb = config.graph.type == "absorb"
+        vocab_size = config.tokens + (1 if self.absorb else 0)
+        #print(f"{vocab_size=}")
+        self.vocab_embed = EmbeddingLayer(config.model.hidden_size, vocab_size)
+        self.sigma_map = TimestepEmbedder(config.model.cond_dim)
+        self.rotary_emb = rotary.Rotary(config.model.hidden_size // config.model.n_heads)
+
+        self.esm_proj = nn.Linear(config.model.esm_dim, config.model.cond_dim) if config.model.use_esm else None
+        self.mol_proj = nn.Linear(config.model.molformer_dim, config.model.cond_dim) if config.model.use_molformer else None
+
+        self.blocks = nn.ModuleList([
+            DDiTBlock(config.model.hidden_size, config.model.n_heads, config.model.cond_dim, dropout=config.model.dropout) for _ in range(config.model.n_blocks)
+        ])
+
+        self.output_layer = DDitFinalLayer(config.model.hidden_size, vocab_size, config.model.cond_dim)
+        self.scale_by_sigma = config.model.scale_by_sigma
+
+    
+    def _get_bias_dropout_scale(self):
+        return (
+            bias_dropout_add_scale_fused_train
+            if self.training
+            else bias_dropout_add_scale_fused_inference
+        )
+
+
+    def forward(self, indices, sigma, esm_cond=None, mol_cond=None):
+
+        #print(indices.size)
+        x = self.vocab_embed(indices)
+        c = F.silu(self.sigma_map(sigma))
+
+        # Add conditioner projections
+        conds = [c]
+        if self.esm_proj and esm_cond is not None:
+            esm_c = self.esm_proj(esm_cond)  # (B, cond_dim)
+            conds.append(esm_c)
+        if self.mol_proj and mol_cond is not None:
+            mol_c = self.mol_proj(mol_cond)  # (B, cond_dim)
+            conds.append(mol_c)
+        c = torch.cat(conds, dim=-1)  # Final conditioner
+
+        rotary_cos_sin = self.rotary_emb(x)
+
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            for i in range(len(self.blocks)):
+                x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
+
+            x = self.output_layer(x, c)
+
+
+        if self.scale_by_sigma:
+            assert self.absorb, "Haven't configured this to work."
+            esigm1_log = torch.where(sigma < 0.5, torch.expm1(sigma), sigma.exp() - 1).log().to(x.dtype)[:, None, None]
+            x = x - esigm1_log - np.log(x.shape[-1] - 1)# this will be approximately averaged at 0
+            
+        #print("x.shape:", x.shape)
+        #print("indices.shape:", indices.shape)
+        #print("indices.max():", indices.max().item())
+        #print("x.shape[-1]:", x.shape[-1])
+        x = torch.scatter(x, -1, indices[..., None], torch.zeros_like(x[..., :1]))
+        #x = x.index_fill(-1, indices, 0)  # only works if indices are flat and dim matches
+
+        return x
+
+
+
+
+
+
+class _SEDD(nn.Module, PyTorchModelHubMixin):
     def __init__(self, config):
         super().__init__()
 
@@ -297,3 +376,46 @@ class SEDD(nn.Module, PyTorchModelHubMixin):
         #x = x.index_fill(-1, indices, 0)  # only works if indices are flat and dim matches
 
         return x
+
+class __SEDD(nn.Module, PyTorchModelHubMixin):
+    def __init__(self, config):
+        super().__init__()
+
+        # ... existing init code ...
+
+        self.esm_proj = nn.Linear(config.model.esm_dim, config.model.cond_dim) if config.model.use_esm else None
+        self.mol_proj = nn.Linear(config.model.molformer_dim, config.model.cond_dim) if config.model.use_molformer else None
+
+        # ... rest of init remains unchanged ...
+
+    def forward(self, indices, sigma, esm_cond=None, mol_cond=None):
+        x = self.vocab_embed(indices)
+        c = F.silu(self.sigma_map(sigma))  # (B, cond_dim)
+
+        # Add conditioner projections
+        conds = [c]
+        if self.esm_proj and esm_cond is not None:
+            esm_c = self.esm_proj(esm_cond)  # (B, cond_dim)
+            conds.append(esm_c)
+        if self.mol_proj and mol_cond is not None:
+            mol_c = self.mol_proj(mol_cond)  # (B, cond_dim)
+            conds.append(mol_c)
+        c = torch.cat(conds, dim=-1)  # Final conditioner
+
+        rotary_cos_sin = self.rotary_emb(x)
+
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            for i in range(len(self.blocks)):
+                x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
+
+            x = self.output_layer(x, c)
+
+        # ... scaling by sigma and zeroing out ground-truth token logits ...
+        if self.scale_by_sigma:
+            assert self.absorb, "Haven't configured this to work."
+            esigm1_log = torch.where(sigma < 0.5, torch.expm1(sigma), sigma.exp() - 1).log().to(x.dtype)[:, None, None]
+            x = x - esigm1_log - np.log(x.shape[-1] - 1)
+
+        x = torch.scatter(x, -1, indices[..., None], torch.zeros_like(x[..., :1]))
+        return x
+
