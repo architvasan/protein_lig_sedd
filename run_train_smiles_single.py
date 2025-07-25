@@ -329,7 +329,7 @@ class Train_pl_sedd:
 
 
 def run_train(
-        work_dir, cfg_fil, plinder_output_dir = './plinder', plinder_data_dir='./plinder', epochs=10, max_samples=10000, batch_size=2, num_workers=1, train_ratio=0.8, val_ratio=0.1, max_protein_len=1024, max_ligand_len=128, use_structure=False, seed=42, force_reprocess=False):
+        work_dir, cfg_fil, plinder_output_dir = './plinder_10k/processed_plinder_data', plinder_data_dir='./plinder_10k/processed_plinder_data', epochs=10, max_samples=1000000, batch_size=32, num_workers=1, train_ratio=0.8, val_ratio=0.1, max_protein_len=1024, max_ligand_len=128, use_structure=False, seed=42, force_reprocess=False):
 
     trainer_object= Train_pl_sedd(
                             work_dir,
@@ -347,7 +347,7 @@ def run_train(
                             use_structure,
                             seed,
                             force_reprocess,
-    ) 
+    )
 
     trainer_object.train()
 
