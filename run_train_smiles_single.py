@@ -261,7 +261,16 @@ class Train_pl_sedd:
 
                 try:
                     if self.cfg.data.train != "text8":
-                        batch = next(train_iter)['ligand_tokens'].to(self.device)
+                        batch_tot = next(train_iter)
+                        batch_lig = batch_tot['ligand_tokens'].to(self.device)
+                        batch_prot = (batch_tot['protein_tokens']+self.cfg.tokens_lig).to(self.device)
+                        print(batch_prot)
+                        batch = torch.concat([batch_lig, batch_prot], axis=1)
+                        print(batch.shape)
+                        #print(batch)
+                        #print(batch.shape)
+                        #import sys
+                        #sys.exit()
                     else:
                         batch = next(train_iter).to(self.device)
                 except StopIteration:
@@ -297,7 +306,7 @@ class Train_pl_sedd:
                     save_step = step // self.cfg.training.snapshot_freq
                     utils.save_checkpoint(os.path.join(self.checkpoint_dir, f'checkpoint_{save_step}.pth'), self.state)
 
-                    if self.cfg.training.snapshot_sampling:
+                    if False:#self.cfg.training.snapshot_sampling:
                         print(f"Generating samples at step: {step}")
                         this_sample_dir = os.path.join(self.sample_dir, f"iter_{step}")
                         utils.makedirs(this_sample_dir)
