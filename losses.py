@@ -8,7 +8,7 @@ from model import utils as mutils
 
 def get_loss_fn(noise, graph, train=True, sampling_eps=1e-3, lv=False):
 
-    def loss_fn(model, batch, cond=None, t=None, perturbed_batch=None):
+    def loss_fn(model, batch, cond=None, t=None, perturbed_batch=None, esm_cond=None, mol_cond=None):
         """
         Batch shape: [B, L] int. D given from graph
         """
@@ -25,7 +25,7 @@ def get_loss_fn(noise, graph, train=True, sampling_eps=1e-3, lv=False):
             perturbed_batch = graph.sample_transition(batch, sigma[:, None])
         #print(f"{perturbed_batch=}")
         log_score_fn = mutils.get_score_fn(model, train=train, sampling=False)
-        log_score = log_score_fn(perturbed_batch, sigma)
+        log_score = log_score_fn(perturbed_batch, sigma, esm_cond, mol_cond)
         #print(f"{log_score=}")
         loss = graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
         #print(f"{loss=}")
@@ -81,7 +81,7 @@ def get_step_fn(noise, graph, train, optimize_fn, accum):
     accum_iter = 0
     total_loss = 0
 
-    def step_fn(state, batch, cond=None):
+    def step_fn(state, batch, cond=None, esm_cond=None, mol_cond=None):
         #nonlocal accum_iter 
         #nonlocal total_loss
         
@@ -92,7 +92,7 @@ def get_step_fn(noise, graph, train, optimize_fn, accum):
         if train:
             optimizer = state['optimizer']
             scaler = state['scaler']
-            loss = loss_fn(model, batch, cond=cond).mean() / accum
+            loss = loss_fn(model, batch, cond=cond, esm_cond=esm_cond, mol_cond=mol_cond).mean() / accum
             
             scaler.scale(loss).backward()
 

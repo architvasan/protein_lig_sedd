@@ -270,7 +270,7 @@ class Train_pl_sedd:
                         batch_tot = next(train_iter)
                         batch_lig_seq = batch_tot['ligand_smiles']
                         batch_prot_seq = batch_tot['protein_seq']
-                        batch_lig, batch_prot, lig_emb, prot_emb = self.embedding_mol_prot.process_embeddings(
+                        batch_lig, batch_prot, mol_cond, esm_cond = self.embedding_mol_prot.process_embeddings(
                             batch_prot_seq,
                             batch_lig_seq)
                         batch_lig = batch_lig.to(self.device)
@@ -290,7 +290,7 @@ class Train_pl_sedd:
                     # End of dataset for this epoch
                     break
 
-                loss = train_step_fn(self.state, batch)
+                loss = train_step_fn(self.state, batch, esm_cond=esm_cond, mol_cond=mol_cond)
                 step = self.state['step']
 
                 # Logging and checkpointing
