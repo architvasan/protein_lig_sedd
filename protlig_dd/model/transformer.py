@@ -161,7 +161,7 @@ class DDiTBlock(nn.Module):
         x_skip = x
         x = modulate_fused(self.norm1(x), shift_msa, scale_msa)
         # dtype0 = x.dtype
-
+        #print(x.size())
         qkv = self.attn_qkv(x)
         qkv = rearrange(qkv, 'b s (three h d) -> b s three h d', three=3, h=self.n_heads)
         with torch.cuda.amp.autocast(enabled=False):
@@ -198,13 +198,13 @@ class EmbeddingLayer(nn.Module):
         """
         super().__init__()
 
-        #self.embedding = nn.Embedding(37, dim)#vocab_dim + 1, dim)
+        self.embedding = nn.Embedding(vocab_dim, dim)#vocab_dim + 1, dim)
         # Optionally initialize manually
         #torch.nn.init.kaiming_uniform_(self.embedding.weight, a=math.sqrt(5))
 
-        self.embedding = nn.Parameter(torch.empty((vocab_dim, dim)))#(vocab_dim+1, dim)))
+        #self.embedding = nn.Parameter(torch.empty((vocab_dim, dim)))#(vocab_dim+1, dim)))
         #torch.nn.init.xavier_uniform_(self.embedding)
-        torch.nn.init.kaiming_uniform_(self.embedding, a=math.sqrt(5))
+        #torch.nn.init.kaiming_uniform_(self.embedding, a=math.sqrt(5))
 
     def forward(self, x):
         #print(self.embedding)
@@ -213,7 +213,8 @@ class EmbeddingLayer(nn.Module):
         #print("x.min():", x.min().item())
         #print("x.max():", x.max().item())
         #print("embedding.num_embeddings:", self.embedding.num_embeddings)
-        return self.embedding[x]
+        return self.embedding(x)
+        #return self.embedding[x]
 
 
 class DDitFinalLayer(nn.Module):
@@ -252,9 +253,10 @@ class SEDD(nn.Module, PyTorchModelHubMixin):
         self.sigma_map = TimestepEmbedder(config.model.cond_dim)
         self.rotary_emb = rotary.Rotary(config.model.hidden_size // config.model.n_heads)
 
-        self.esm_proj = nn.Linear(config.model.esm_dim, config.model.cond_dim) if config.model.use_esm else None
-        self.mol_proj = nn.Linear(config.model.molformer_dim, config.model.cond_dim) if config.model.use_molformer else None
-
+        self.esm_proj = nn.Linear(config.model.esm_dim, config.model.cond_dim)# if config.model.use_esm else None
+        self.mol_proj = nn.Linear(config.model.molformer_dim, config.model.cond_dim)# if config.model.use_molformer else None
+        self.esm_norm = nn.BatchNorm1d(self.config.model.cond_dim)
+        self.mol_norm = nn.BatchNorm1d(self.config.model.cond_dim)
         self.blocks = nn.ModuleList([
             DDiTBlock(config.model.hidden_size, config.model.n_heads, config.model.cond_dim, dropout=config.model.dropout) for _ in range(config.model.n_blocks)
         ])
@@ -274,19 +276,30 @@ class SEDD(nn.Module, PyTorchModelHubMixin):
     def forward(self, indices, sigma, esm_cond=None, mol_cond=None):
 
         #print(indices.size)
+        #print("ESM cond")
+        #print(esm_cond.size())
         x = self.vocab_embed(indices)
+        #print("vocab embedded")
+        #print(x.size())
         c = F.silu(self.sigma_map(sigma))
+
 
         # Add conditioner projections
         conds = [c]
         if self.esm_proj and esm_cond is not None:
             esm_c = self.esm_proj(esm_cond)  # (B, cond_dim)
+            esm_c = self.esm_norm(esm_c)
             conds.append(esm_c)
+            #print(f"{esm_c.size()=}")
+
         if self.mol_proj and mol_cond is not None:
             mol_c = self.mol_proj(mol_cond)  # (B, cond_dim)
+            mol_c = self.mol_norm(mol_c)
+            #print(f"{mol_c.size()=}")
             conds.append(mol_c)
-        c = torch.cat(conds, dim=-1)  # Final conditioner
-
+        c = torch.mean(torch.stack(conds), dim=0)  # Final conditioner
+        #print("conditioner")
+        #print(c.size())
         rotary_cos_sin = self.rotary_emb(x)
 
         with torch.cuda.amp.autocast(dtype=torch.bfloat16):
@@ -400,7 +413,8 @@ class __SEDD(nn.Module, PyTorchModelHubMixin):
         if self.mol_proj and mol_cond is not None:
             mol_c = self.mol_proj(mol_cond)  # (B, cond_dim)
             conds.append(mol_c)
-        c = torch.cat(conds, dim=-1)  # Final conditioner
+        c = torch.mean(torch.stack(conds), dim=0)  # Final conditioner
+        #torch.stack(tensor_list)
 
         rotary_cos_sin = self.rotary_emb(x)
 

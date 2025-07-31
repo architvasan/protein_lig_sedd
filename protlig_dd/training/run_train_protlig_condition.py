@@ -3,25 +3,25 @@ import os
 import os.path
 import gc
 from itertools import chain
-
+import wandb
 import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.nn.functional as F
 
-import data
-import losses
-import sampling
-import graph_lib
-import noise_lib
-import utils
-from model import SEDD
-from model.ema import ExponentialMovingAverage
+import protlig_dd.data as data
+import protlig_dd.processing.losses as losses
+import protlig_dd.sampling.sampling as sampling
+import protlig_dd.processing.graph_lib as graph_lib
+import protlig_dd.processing.noise_lib as noise_lib
+import protlig_dd.utils.utils as utils
+from protlig_dd.model import SEDD
+from protlig_dd.model.ema import ExponentialMovingAverage
 from transformers import GPT2TokenizerFast, GPT2LMHeadModel
 from SmilesPE.tokenizer import *
 #from smallmolec_campaign.utils.smiles_pair_encoders_functions import *
-from updated_data_pipeline import create_improved_data_loaders
+from protlig_dd.data.updated_data_pipeline import create_improved_data_loaders
 from dataclasses import dataclass
 import yaml
 import inspect
@@ -45,8 +45,6 @@ class Train_pl_sedd:
     cfg_fil: str
     plinder_output_dir: str='./plinder'
     plinder_data_dir:str ='./plinder'
-    mol_emb_id: str = "ibm/MoLFormer-XL-both-10pct",
-    prot_emb_id: str = "facebook/esm2_t30_150M_UR50D",
 
     epochs: int=10
     max_samples:int =200
@@ -59,6 +57,9 @@ class Train_pl_sedd:
     use_structure:bool =False#args.use_structure,
     seed:int=42#args.seed,
     force_reprocess:bool=False#args.force_reprocess
+    mol_emb_id: str = "ibm/MoLFormer-XL-both-10pct"
+    prot_emb_id: str = "facebook/esm2_t30_150M_UR50D"
+
 
     def __post_init__(self):
         with open(self.cfg_fil, "r") as f:
@@ -77,6 +78,16 @@ class Train_pl_sedd:
         os.makedirs(self.checkpoint_meta_dir, exist_ok = True)
         self.device = torch.device(f"cuda:0" if torch.cuda.is_available() else "cpu")
 
+        run = wandb.init(
+            # Set the wandb entity where your project will be logged (generally your team name).
+            entity="avasan",
+            # Set the wandb project where this run will be logged.
+            project="protein-lig-sedd",
+            # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
+            name=f"experiment_run_1",
+            # Track hyperparameters and run metadata.
+        )
+
     @staticmethod
     def smilespetok(
             vocab_file = '../../VocabFiles/vocab_spe.txt',
@@ -88,8 +99,8 @@ class Train_pl_sedd:
         self.train_ds, self.eval_ds, test_loader = create_improved_data_loaders(
             plinder_output_dir=self.plinder_output_dir,#'./plinder',
             plinder_data_dir=self.plinder_data_dir,#'./plinder',
-            max_samples=200,
-            batch_size=2,
+            max_samples=10000,
+            batch_size=self.batch_size,
             num_workers=1,
             train_ratio=0.8,
             val_ratio=0.1,#args.val_ratio,
@@ -245,6 +256,20 @@ class Train_pl_sedd:
         self.load_model()
         self.optim_state()
 
+        wandb.login()
+        run = wandb.init(
+            # Set the wandb entity where your project will be logged (generally your team name).
+            entity="avasan",
+            # Set the wandb project where this run will be logged.
+            project="protein-lig-sedd",
+            # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
+            name=f"experiment_run_1",
+            # Track hyperparameters and run metadata.
+            config={                         # Track hyperparameters and metadata
+                    "epochs": 10,
+                    },
+        )
+
         optimize_fn = losses.optimization_manager(self.cfg)
         train_step_fn = losses.get_step_fn(self.noise, self.graph, True, optimize_fn, self.cfg.training.accum)
         eval_step_fn = losses.get_step_fn(self.noise, self.graph, False, optimize_fn, self.cfg.training.accum)
@@ -270,16 +295,18 @@ class Train_pl_sedd:
                         batch_tot = next(train_iter)
                         batch_lig_seq = batch_tot['ligand_smiles']
                         batch_prot_seq = batch_tot['protein_seq']
+                        #print(batch_prot_seq)
                         batch_lig, batch_prot, mol_cond, esm_cond = self.embedding_mol_prot.process_embeddings(
                             batch_prot_seq,
                             batch_lig_seq)
+                        #print(batch_lig)
                         batch_lig = batch_lig.to(self.device)
                         batch_prot = batch_prot.to(self.device)
                         #batch_lig = batch_tot['ligand_tokens'].to(self.device)
                         #batch_prot = (batch_tot['protein_tokens']+self.cfg.tokens_lig).to(self.device)
-                        print(batch_prot)
-                        batch = torch.concat([batch_lig, batch_prot], axis=1)
-                        print(batch.shape)
+                        #print(batch_prot['input_ids'])
+                        batch = torch.concat([batch_lig['input_ids'], batch_prot['input_ids']+2363], axis=1)
+                        #print(batch.shape)
                         #print(batch)
                         #print(batch.shape)
                         #import sys
@@ -294,6 +321,7 @@ class Train_pl_sedd:
                 step = self.state['step']
 
                 # Logging and checkpointing
+                wandb.log({"training_loss": loss.item()})
                 if step % self.cfg.training.log_freq == 0:
                     print(f"epoch: {ep}, step: {step}, training_loss: {loss.item():.5e}")
 
@@ -304,7 +332,20 @@ class Train_pl_sedd:
                     eval_iter = iter(self.eval_ds)
                     try:
                         if self.cfg.data.valid != "text8":
-                            eval_batch = next(eval_iter)['ligand_tokens'].to(self.device)
+                            #eval_batch = next(eval_iter)['ligand_tokens'].to(self.device)
+                            eval_batch_lig_seq = batch_tot['ligand_smiles']
+                            eval_batch_prot_seq = batch_tot['protein_seq']
+                            #print(batch_prot_seq)
+                            eval_batch_lig, eval_batch_prot, eval_mol_cond, eval_esm_cond = self.embedding_mol_prot.process_embeddings(
+                                eval_batch_prot_seq,
+                                eval_batch_lig_seq)
+                            #print(batch_lig)
+                            eval_batch_lig = eval_batch_lig.to(self.device)
+                            eval_batch_prot = eval_batch_prot.to(self.device)
+                            #batch_lig = batch_tot['ligand_tokens'].to(self.device)
+                            #batch_prot = (batch_tot['protein_tokens']+self.cfg.tokens_lig).to(self.device)
+                            #print(batch_prot['input_ids'])
+                            eval_batch = torch.concat([eval_batch_lig['input_ids'], eval_batch_prot['input_ids']+2363], axis=1)
                         else:
                             eval_batch = next(eval_iter).to(self.device)
                     except StopIteration:
@@ -312,34 +353,17 @@ class Train_pl_sedd:
                         eval_batch = None
 
                     if eval_batch is not None:
-                        eval_loss = eval_step_fn(self.state, eval_batch)
+                        eval_loss = eval_step_fn(self.state, eval_batch, esm_cond=esm_cond, mol_cond=mol_cond)
                         print(f"epoch: {ep}, step: {step}, evaluation_loss: {eval_loss.item():.5e}")
+                        wandb.log({"evaluation_loss": eval_loss.item()})
+
 
                 if (step > 0 and step % self.cfg.training.snapshot_freq == 0) or step == num_train_steps:
                     save_step = step // self.cfg.training.snapshot_freq
                     utils.save_checkpoint(os.path.join(self.checkpoint_dir, f'checkpoint_{save_step}.pth'), self.state)
 
-                    if False:#self.cfg.training.snapshot_sampling:
-                        print(f"Generating samples at step: {step}")
-                        this_sample_dir = os.path.join(self.sample_dir, f"iter_{step}")
-                        utils.makedirs(this_sample_dir)
 
-                        self.ema.store(self.score_model.parameters())
-                        self.ema.copy_to(self.score_model.parameters())
-                        sample = self.sampling_fn(self.score_model)
-                        self.ema.restore(self.score_model.parameters())
-
-                        vocab_tok_smiles = list("CNOSPFBrClI()[]+=\\#-@:123456789%/c.nsop")
-                        sentences = [vocab_tok_smiles[i_v] for i_v in sample[0]]
-                        print(''.join(sentences))
-
-                        file_name = os.path.join(this_sample_dir, "sample_.txt")
-                        with open(file_name, 'w') as file:
-                            for sentence in sentences:
-                                file.write(sentence + "\n")
-                                file.write("=" * 92 + "\n")
-
-
+        wandb.finish()
 
 def run_train(
         work_dir, cfg_fil, plinder_output_dir = './plinder_10k/processed_plinder_data', plinder_data_dir='./plinder_10k/processed_plinder_data', epochs=10, max_samples=1000000, batch_size=32, num_workers=1, train_ratio=0.8, val_ratio=0.1, max_protein_len=1024, max_ligand_len=128, use_structure=False, seed=42, force_reprocess=False):

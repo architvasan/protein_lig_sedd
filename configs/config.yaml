@@ -1,32 +1,34 @@
 work_dir: /eagle/FoundEpidem/avasan/IDEAL/DiffusionModels/protein_lig_sedd
 
 model:
-  name: tiny           
+  name: medium           
   type: ddit
   hidden_size: 1024 #768
-  cond_dim: 128
-  length: 36 #128
+  cond_dim: 1024 #512 #28
+  length: 1088 #36 #128
   n_blocks: 8
   n_heads: 8
   scale_by_sigma: True
   dropout: 0.1
+  esm_dim: 640 #332 #1024
+  molformer_dim: 768
 
 defaults:
   - _self_
   - model: tiny
 
 ngpus: 1
-tokens: 39 #25
+tokens: 2396 #39 #25
 
 training:
-  batch_size: 4
+  batch_size: 32
   accum: 1
-  epochs: 10
+  epochs: 100
   max_samples: 10000
   num_workers: 1
   seed: 42
   force_reprocess: False
-  n_iters: 10000 #10_000
+  n_iters: 1000000 #10_000
   snapshot_freq: 200 #1_000
   log_freq: 50
   eval_freq: 200
@@ -51,8 +53,8 @@ graph:
   report_all: False
 
 noise:
-  type: loglinear
-  sigma_min: !!float "1e-4"
+  type: loglinear #geometric #
+  sigma_min: !!float "1e-5"
   sigma_max: 20
 
 sampling:
@@ -68,7 +70,7 @@ eval:
 optim:
   weight_decay: 0
   optimizer: AdamW
-  lr: !!float "3e-4"
+  lr: !!float "3e-5"
   beta1: 0.9
   beta2: 0.999
   eps: !!float "1e-8"

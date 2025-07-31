@@ -1,9 +1,9 @@
 import abc
 import torch
 import torch.nn.functional as F
-from catsample import sample_categorical
+from protlig_dd.utils.catsample import sample_categorical
 
-from model import utils as mutils
+from protlig_dd.model import utils as mutils
 
 _PREDICTORS = {}
 

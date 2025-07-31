@@ -1,10 +1,10 @@
 import os
 import torch
-from model import SEDD
-import utils
-from model.ema import ExponentialMovingAverage
-import graph_lib
-import noise_lib
+from protlig_dd.model import SEDD
+import protlig_dd.utils.utils as utils
+from protlig_dd.model.ema import ExponentialMovingAverage
+import protlig_dd.processing.graph_lib as graph_lib
+import protlig_dd.processing.noise_lib as noise_lib
 
 from omegaconf import OmegaConf
 

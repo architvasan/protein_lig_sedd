@@ -1,12 +1,11 @@
 import torch
 import argparse
 
-from data import CharacterTokenizer
-from load_model import load_model
+from protlig_dd.data.data import CharacterTokenizer
+from protlig_dd.utils.load_model import load_model
 from transformers import GPT2TokenizerFast
 import torch.nn.functional as F
-import sampling
-
+import protlig_dd.sampling.sampling as sampling
 
 def main():
     parser = argparse.ArgumentParser(description="Generate some samples")

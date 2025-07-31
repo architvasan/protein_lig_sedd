@@ -30,3 +30,4 @@ train_smiles.err
 test_smiles_single.err
 model/_transformer.py
 plinder_10k/
+logs/

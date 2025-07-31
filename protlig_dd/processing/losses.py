@@ -2,8 +2,8 @@ import torch
 import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
-import graph_lib
-from model import utils as mutils
+import protlig_dd.processing.graph_lib as graph_lib
+from protlig_dd.model import utils as mutils
 
 
 def get_loss_fn(noise, graph, train=True, sampling_eps=1e-3, lv=False):
@@ -25,12 +25,14 @@ def get_loss_fn(noise, graph, train=True, sampling_eps=1e-3, lv=False):
             perturbed_batch = graph.sample_transition(batch, sigma[:, None])
         #print(f"{perturbed_batch=}")
         log_score_fn = mutils.get_score_fn(model, train=train, sampling=False)
-        log_score = log_score_fn(perturbed_batch, sigma, esm_cond, mol_cond)
+        log_score = log_score_fn(perturbed_batch, sigma, esm_cond, mol_cond) # * 100
         #print(f"{log_score=}")
         loss = graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+        print(loss)
         #print(f"{loss=}")
-        loss = (dsigma[:, None] * loss).sum(dim=-1)
-
+        if False:
+            loss = (dsigma[:, None] * loss).sum(dim=-1)
+        print(loss)
         return loss
 
     return loss_fn

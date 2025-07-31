@@ -14,7 +14,7 @@ def get_model_fn(model, train=False):
         A model function.
     """
 
-    def model_fn(x, sigma):
+    def model_fn(x, sigma, esm_cond, mol_cond):
         """Compute the output of the score-based model.
 
         Args:
@@ -33,7 +33,7 @@ def get_model_fn(model, train=False):
             # otherwise output the raw values (we handle mlm training in losses.py)
         #print(x, sigma)
         #print(model)
-        return model(x, sigma)
+        return model(x, sigma, esm_cond, mol_cond)
 
     return model_fn
 
