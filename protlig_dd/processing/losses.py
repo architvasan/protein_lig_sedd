@@ -27,12 +27,16 @@ def get_loss_fn(noise, graph, train=True, sampling_eps=1e-3, lv=False):
         log_score_fn = mutils.get_score_fn(model, train=train, sampling=False)
         log_score = log_score_fn(perturbed_batch, sigma, esm_cond, mol_cond) # * 100
         #print(f"{log_score=}")
-        loss = graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
-        print(loss)
+        loss = graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)/batch.shape[0]
+        #print(loss)
         #print(f"{loss=}")
-        if False:
+        #normalized_dsigma = dsigma / dsigma.mean()
+        safe_dsigma = dsigma.clamp(min=1e-6, max=1)#1.0)
+        print(f"{dsigma=}")
+        print(f"{loss=}")
+        if True:
             loss = (dsigma[:, None] * loss).sum(dim=-1)
-        print(loss)
+        #print(loss)
         return loss
 
     return loss_fn

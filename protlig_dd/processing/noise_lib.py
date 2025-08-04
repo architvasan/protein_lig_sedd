@@ -8,7 +8,7 @@ def get_noise(config):
     if config.noise.type == "geometric":
         return GeometricNoise(config.noise.sigma_min, config.noise.sigma_max)
     elif config.noise.type == "loglinear":
-        return LogLinearNoise()
+        return LogLinearNoise(eps=config.noise.eps)
     else:
         raise ValueError(f"{config.noise.type} is not a valid noise")
 

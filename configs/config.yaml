@@ -23,7 +23,7 @@ tokens: 2396 #39 #25
 training:
   batch_size: 32
   accum: 1
-  epochs: 100
+  epochs: 10
   max_samples: 10000
   num_workers: 1
   seed: 42
@@ -42,7 +42,7 @@ data:
   valid: acyp
   cache_dir: data
   train_ratio: 0.8
-  val_ratio: 0.8
+  val_ratio: 0.1
   max_protein_len: 1024
   max_ligand_len: 128
   use_structure: False
@@ -56,7 +56,7 @@ noise:
   type: loglinear #geometric #
   sigma_min: !!float "1e-5"
   sigma_max: 20
-
+  eps: !!float "0.1"
 sampling:
   predictor: euler
   steps: 25
