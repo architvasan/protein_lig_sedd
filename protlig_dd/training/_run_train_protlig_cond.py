@@ -128,9 +128,21 @@ class Train_pl_sedd:
     plinder_output_dir: str='./plinder'
     plinder_data_dir:str ='./plinder'
     mol_emb_id: str = "ibm/MoLFormer-XL-both-10pct"
-    prot_emb_id: str = "facebook/esm2_t30_150M_UR50D"
     dev_id: str = 'cuda:0'
-    seed: int = 42
+    
+    if False:
+        epochs: int=10
+        max_samples:int =200
+        batch_size: int =2
+        num_workers: int=1
+        train_ratio: int=0.8
+        val_ratio: int=0.1#args.val_ratio,
+        max_protein_len: int=1024#args.protein_max_len,
+        max_ligand_len:int =128#args.mol_max_len,
+        use_structure:bool =False#args.use_structure,
+        seed:int=42#args.seed,
+        force_reprocess:bool=False#args.force_reprocess
+
 
     def __post_init__(self):
         """
@@ -140,7 +152,6 @@ class Train_pl_sedd:
         Set device
         """
 
-        wandb.login()
         self.cfg = Config(
                     yamlfile=self.cfg_fil,
                     dictionary=self.cfg_dict)
@@ -176,7 +187,7 @@ class Train_pl_sedd:
                             max_protein_len=self.cfg.data.max_protein_len,
                             max_ligand_len=self.cfg.data.max_ligand_len,
                             use_structure=self.cfg.data.use_structure,
-                            seed=self.seed,
+                            seed=42,
                             force_reprocess=False,
                             )
 
@@ -188,17 +199,20 @@ class Train_pl_sedd:
         
         # build score model
         self.score_model = SEDD(self.cfg).to(self.device)
+        #score_model = DDP(score_model, device_ids=[rank], static_graph=True, find_unused_parameters=True)
         self.ema = ExponentialMovingAverage(
             self.score_model.parameters(), decay=self.cfg.training.ema)
         self.noise = noise_lib.get_noise(self.cfg).to(self.device)
          
     def optim_state(
             self):
-        self.sampling_eps = 1e-3
+        self.sampling_eps = 1e-5
     
         # build optimization state
         self.optimizer = losses.get_optimizer(self.cfg, chain(self.score_model.parameters(), self.noise.parameters()))
+        #print(f"Optimizer: {self.optimizer}")
         self.scaler = torch.cuda.amp.GradScaler()
+        #print(f"Scaler: {self.scaler}")
         self.state = dict(optimizer=self.optimizer,
                         scaler=self.scaler,
                         model=self.score_model,
@@ -206,8 +220,115 @@ class Train_pl_sedd:
                         ema=self.ema,
                         step=0) 
     
+    
         # load in state
+        #self.state = utils.restore_checkpoint(self.checkpoint_meta_dir, state, self.device)
         self.initial_step = int(self.state['step'])
+
+    def _train(self): 
+
+        #print(f"{self.cfg.optim.lr=}")
+        self.cfg.optim.lr = float(self.cfg.optim.lr)
+        self.setup_loaders()
+        self.load_model()
+        self.optim_state()
+        train_iter = iter(self.train_ds)
+        eval_iter = iter(self.eval_ds)
+        #print(train_iter, eval_iter)
+        # Build one-step training and evaluation functions
+        optimize_fn = losses.optimization_manager(self.cfg)
+        train_step_fn = losses.get_step_fn(self.noise, self.graph, True, optimize_fn, self.cfg.training.accum)
+        eval_step_fn = losses.get_step_fn(self.noise, self.graph, False, optimize_fn, self.cfg.training.accum)
+        
+        #print(inspect.signature(optimize_fn))
+        #print(inspect.signature(train_step_fn))
+        #print(inspect.signature(eval_step_fn))
+#
+        if self.cfg.training.snapshot_sampling:
+            sampling_shape = (self.cfg.training.batch_size // (self.cfg.ngpus * self.cfg.training.accum), self.cfg.model.length)
+            self.sampling_fn = sampling.get_sampling_fn(self.cfg, self.graph, self.noise, sampling_shape, self.sampling_eps, self.device)
+
+        num_train_steps = self.cfg.training.n_iters
+        print(f"Starting training loop at step {self.initial_step}.")
+        print(self.epochs)
+        for ep in range(self.epochs):
+            for b in train_iter:
+            #while self.state['step'] < num_train_steps + 1: ##OLD
+                step = self.state['step'] ##OLD
+                self.state['step']+=1 ## NEW
+
+                if self.cfg.data.train != "text8":
+                    #print(next(train_iter)['ligand_tokens'].to(device))
+                    #batch = next(train_iter)['ligand_tokens'].to(self.device) ##OLD
+                    batch = b['ligand_tokens'].to(self.device) ##NEW
+                else:
+                    #batch = next(train_iter).to(self.device) ##OLD
+                    batch = b.to(self.device) ##NEW
+                    #print(batch)
+                loss = train_step_fn(self.state, batch)
+                #print(f"{loss=}")
+                # flag to see if there was movement ie a full batch got computed
+                if step != self.state['step']:
+                    if step % self.cfg.training.log_freq == 0:
+                        #dist.all_reduce(loss)
+                        #loss /= world_size
+
+                        print("epoch: %d, step: %d, training_loss: %.5e" % (ep, step, loss.item()))
+
+                    if step % self.cfg.training.snapshot_freq_for_preemption == 0 :
+                        utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check.pth', self.state)
+
+                    
+                    if step % self.cfg.training.eval_freq == 0:
+                        if self.cfg.data.valid != "text8":
+                            #print(next(eval_iter))
+                            eval_batch = next(eval_iter)['ligand_tokens'].to(self.device)
+                        else:
+                            eval_batch = next(eval_iter).to(self.device)
+
+                        eval_loss = eval_step_fn(self.state, eval_batch)
+
+                        #dist.all_reduce(eval_loss)
+                        #eval_loss /= world_size
+
+                        print("epoch: %d, step: %d, evaluation_loss: %.5e" % (ep, step, eval_loss.item()))
+
+                    if step > 0 and step % self.cfg.training.snapshot_freq == 0 or step == num_train_steps:
+                        # Save the checkpoint.
+                        save_step = step // self.cfg.training.snapshot_freq
+                        if True:
+                            utils.save_checkpoint(os.path.join(
+                                self.checkpoint_dir, f'checkpoint_{save_step}.pth'), self.state)
+
+                        # Generate and save samples
+                        if self.cfg.training.snapshot_sampling:
+                            print(f"Generating text at step: {step}")
+
+                            this_sample_dir = os.path.join(self.sample_dir, "iter_{}".format(step))
+                            utils.makedirs(this_sample_dir)
+
+                            self.ema.store(self.score_model.parameters())
+                            self.ema.copy_to(self.score_model.parameters())
+                            sample = self.sampling_fn(self.score_model)
+                            self.ema.restore(self.score_model.parameters())
+
+                            vocab_tok_smiles = list("CNOSPFBrClI()[]+=\\#-@:123456789%/c.nsop")
+                            sentences = [vocab_tok_smiles[i_v] for i_v in sample[0]]#self.tokenizer.batch_decode(sample)
+                            print(''.join(sentences))
+                            #print(sentences) 
+                            file_name = os.path.join(this_sample_dir, f"sample_.txt")
+                            with open(file_name, 'w') as file:
+                                for sentence in sentences:
+                                    file.write(sentence + "\n")
+                                    file.write("============================================================================================\n")
+
+                            if self.cfg.eval.perplexity:
+                                with torch.no_grad():
+                                    pass
+
+                                #dist.barrier()
+                    #if step>=num_train_steps# *(ep+1):
+                    #    break
                         
     def train(self, wandbproj, wandbname): 
         run = wandb.init(
@@ -216,15 +337,28 @@ class Train_pl_sedd:
             # Set the wandb project where this run will be logged.
             project=wandbproj, #"protein-lig-sedd",
             # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
-            name=wandbname, #f"experiment_run_1",
+            name=wandbname #f"experiment_run_1",
             # Track hyperparameters and run metadata.
-            config=self.cfg.dictionary
         )
 
         self.cfg.optim.lr = float(self.cfg.optim.lr)
         self.setup_loaders()
         self.load_model()
         self.optim_state()
+
+        wandb.login()
+        run = wandb.init(
+            # Set the wandb entity where your project will be logged (generally your team name).
+            entity="avasan",
+            # Set the wandb project where this run will be logged.
+            project="protein-lig-sedd",
+            # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
+            name=f"experiment_run_1",
+            # Track hyperparameters and run metadata.
+            config={                         # Track hyperparameters and metadata
+                    "epochs": 10,
+                    },
+        )
 
         optimize_fn = losses.optimization_manager(self.cfg)
         train_step_fn = losses.get_step_fn(self.noise, self.graph, True, optimize_fn, self.cfg.training.accum)
@@ -236,10 +370,10 @@ class Train_pl_sedd:
 
         num_train_steps = self.cfg.training.n_iters
         print(f"Starting training loop at step {self.initial_step}.")
-        print(f"Training for {self.cfg.training.epochs} epochs or {num_train_steps} steps.")
+        print(f"Training for {self.epochs} epochs or {num_train_steps} steps.")
 
         step = self.state['step']
-        for ep in range(self.cfg.training.epochs):
+        for ep in range(self.epochs):
             train_iter = iter(self.train_ds)  # Reset iterator at start of epoch
             while True:
                 if step >= num_train_steps:
@@ -255,15 +389,18 @@ class Train_pl_sedd:
                         batch_lig, batch_prot, mol_cond, esm_cond = self.embedding_mol_prot.process_embeddings(
                             batch_prot_seq,
                             batch_lig_seq)
-                        batch_lig = batch_lig.to(self.device)
                         #print(batch_lig)
-                        print(f"{batch_lig['input_ids'].shape=}")
-    
+                        batch_lig = batch_lig.to(self.device)
                         batch_prot = batch_prot.to(self.device)
-                        print(f"{batch_prot['input_ids'].shape=}")
-
+                        #batch_lig = batch_tot['ligand_tokens'].to(self.device)
+                        #batch_prot = (batch_tot['protein_tokens']+self.cfg.tokens_lig).to(self.device)
+                        #print(batch_prot['input_ids'])
                         batch = torch.concat([batch_lig['input_ids'], batch_prot['input_ids']+2363], axis=1)
-                        print(f"{batch.shape=}")
+                        #print(batch.shape)
+                        #print(batch)
+                        #print(batch.shape)
+                        #import sys
+                        #sys.exit()
                     else:
                         batch = next(train_iter).to(self.device)
                 except StopIteration:
@@ -285,13 +422,19 @@ class Train_pl_sedd:
                     eval_iter = iter(self.eval_ds)
                     try:
                         if self.cfg.data.valid != "text8":
+                            #eval_batch = next(eval_iter)['ligand_tokens'].to(self.device)
                             eval_batch_lig_seq = batch_tot['ligand_smiles']
                             eval_batch_prot_seq = batch_tot['protein_seq']
+                            #print(batch_prot_seq)
                             eval_batch_lig, eval_batch_prot, eval_mol_cond, eval_esm_cond = self.embedding_mol_prot.process_embeddings(
                                 eval_batch_prot_seq,
                                 eval_batch_lig_seq)
+                            #print(batch_lig)
                             eval_batch_lig = eval_batch_lig.to(self.device)
                             eval_batch_prot = eval_batch_prot.to(self.device)
+                            #batch_lig = batch_tot['ligand_tokens'].to(self.device)
+                            #batch_prot = (batch_tot['protein_tokens']+self.cfg.tokens_lig).to(self.device)
+                            #print(batch_prot['input_ids'])
                             eval_batch = torch.concat([eval_batch_lig['input_ids'], eval_batch_prot['input_ids']+2363], axis=1)
                         else:
                             eval_batch = next(eval_iter).to(self.device)
@@ -313,72 +456,34 @@ class Train_pl_sedd:
         wandb.finish()
 
 def run_train(
-        work_dir,
-        wandbproj,
-        wandbname,
-        cfg_fil=None,
-        cfg_dict=None,
-        plinder_output_dir = './plinder_10k/processed_plinder_data',
-        plinder_data_dir='./plinder_10k/processed_plinder_data',
-        mol_emb_id = "ibm/MoLFormer-XL-both-10pct",
-        prot_emb_id = "facebook/esm2_t30_150M_UR50D",
-        dev_id = "cuda:0",
-        seed=42):
-        #epochs=10, max_samples=1000000, batch_size=32, num_workers=1, train_ratio=0.8, val_ratio=0.1, max_protein_len=1024, max_ligand_len=128, use_structure=False, seed=42, force_reprocess=False):
+        work_dir, cfg_fil, plinder_output_dir = './plinder_10k/processed_plinder_data', plinder_data_dir='./plinder_10k/processed_plinder_data', epochs=10, max_samples=1000000, batch_size=32, num_workers=1, train_ratio=0.8, val_ratio=0.1, max_protein_len=1024, max_ligand_len=128, use_structure=False, seed=42, force_reprocess=False):
 
     trainer_object= Train_pl_sedd(
-                        work_dir = work_dir,
-                        cfg_fil = cfg_fil,
-                        cfg_dict = cfg_dict,
-                        plinder_output_dir = plinder_output_dir,
-                        plinder_data_dir = plinder_data_dir,
-                        mol_emb_id = mol_emb_id,
-                        prot_emb_id = prot_emb_id,
-                        dev_id = dev_id,
-                        seed = seed)
+                            work_dir,
+                            cfg_fil,
+                            plinder_output_dir,
+                            plinder_data_dir,
+                            epochs,
+                            max_samples,
+                            batch_size,
+                            num_workers,
+                            train_ratio,
+                            val_ratio,
+                            max_protein_len,
+                            max_ligand_len,
+                            use_structure,
+                            seed,
+                            force_reprocess,
+    )
 
-    trainer_object.train(wandbproj, wandbname)
-
-import argparse
-
-def main():
-    parser = argparse.ArgumentParser(description="Run model training")
-
-    parser.add_argument('-WD', '--work_dir', type=str, default='.', help='working dir')
-    parser.add_argument('-cf', '--config_file', type=str, default='configs/config.yaml', help='Yaml file with arguments')
-    parser.add_argument('-wp', '--wandbproj', type=str, default='protlig_sedd', help='WandB project')
-    parser.add_argument('-wn', '--wandbname', type=str, default='run1', help='WandB name')
-    parser.add_argument('-po', '--plinder_output_dir', type=str, default='./plinder_10k/processed_plinder_data', help='where to output processed plinder data')
-    parser.add_argument('-pd', '--plinder_data_dir', type=str, default='./plinder_10k/processed_plinder_data', help='where to output processed plinder data')
-    parser.add_argument('-me', '--mol_emb_id', type=str, default="ibm/MoLFormer-XL-both-10pct", help='model for mol embedding')
-    parser.add_argument('-pe', '--prot_emb_id', type=str, default="facebook/esm2_t30_150M_UR50D", help='model for protein embedding')
-    parser.add_argument('-di', '--dev_id', type=str, default='cuda:0', help='device')
-    parser.add_argument('-s', '--seed', type=int, default=42, help='seed')
-    
-    args = parser.parse_args()
-
-    run_train(
-        work_dir=args.work_dir,
-        wandbproj=args.wandbproj,
-        wandbname=args.wandbname,
-        cfg_fil=args.config_file,
-        plinder_output_dir=args.plinder_output_dir,
-        plinder_data_dir=args.plinder_data_dir,
-        mol_emb_id=args.mol_emb_id,
-        prot_emb_id=args.prot_emb_id,
-        dev_id=args.dev_id,
-        seed=args.seed
-        )
-
-if __name__ == '__main__':
-    main()
+    trainer_object.train()
 
 
+if __name__=="__main__":
+    work_dir = "/eagle/FoundEpidem/avasan/IDEAL/DiffusionModels/protein_lig_sedd" 
+    cfg_fil = "./configs/config.yaml"
 
-
-
-
-
+    run_train(work_dir, cfg_fil)
 
 # def setup_stuff(work_dir):
 #     sample_dir = os.path.join(work_dir, "samples")

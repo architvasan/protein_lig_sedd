@@ -9,6 +9,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, DistributedSampler
 
 import protlig_dd.data as data
 import protlig_dd.processing.losses as losses
@@ -21,11 +22,12 @@ from protlig_dd.model.ema import ExponentialMovingAverage
 from transformers import GPT2TokenizerFast, GPT2LMHeadModel
 from SmilesPE.tokenizer import *
 #from smallmolec_campaign.utils.smiles_pair_encoders_functions import *
-from protlig_dd.data.updated_data_pipeline import create_improved_data_loaders
+from protlig_dd.data.process_full_plinder import ddp_data_loaders
 from dataclasses import dataclass
 import yaml
 import inspect
-import get_embeddings
+import protlig_dd.data.get_embeddings as get_embeddings
+
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 @dataclass
@@ -123,10 +125,9 @@ class Train_pl_sedd:
         grad_clip: 1.
     """
     work_dir: str
+    datafile: str
     cfg_fil: str | None = None # either yaml file or dict
     cfg_dict: object | None = None
-    plinder_output_dir: str='./plinder'
-    plinder_data_dir:str ='./plinder'
     mol_emb_id: str = "ibm/MoLFormer-XL-both-10pct"
     prot_emb_id: str = "facebook/esm2_t30_150M_UR50D"
     dev_id: str = 'cuda:0'
@@ -140,11 +141,9 @@ class Train_pl_sedd:
         Set device
         """
 
-        wandb.login()
         self.cfg = Config(
                     yamlfile=self.cfg_fil,
                     dictionary=self.cfg_dict)
-        print(self.cfg.dictionary)
         self.embedding_mol_prot = get_embeddings.Embed_Mol_Prot(self.mol_emb_id, self.prot_emb_id)
 
         self.sample_dir = os.path.join(self.work_dir, "samples")
@@ -153,9 +152,17 @@ class Train_pl_sedd:
         os.makedirs(self.sample_dir, exist_ok = True)
         os.makedirs(self.checkpoint_dir, exist_ok = True)
         os.makedirs(self.checkpoint_meta_dir, exist_ok = True)
-        self.device = torch.device(self.dev_id)
+        #self.device = torch.device(self.dev_id)
         #f"cuda:0" if torch.cuda.is_available() else "cpu")
-
+        # -----------------------
+        # Setup DDP
+        # -----------------------
+        self.local_rank = int(os.environ['LOCAL_RANK'])
+        torch.cuda.set_device(self.local_rank)
+        dist.init_process_group(backend='nccl')
+        self.device = torch.device(f'cuda:{self.local_rank}')
+        if dist.get_rank() == 0:
+            wandb.login()
 
     @staticmethod
     def smilespetok(
@@ -163,22 +170,21 @@ class Train_pl_sedd:
             spe_file = '../../VocabFiles/SPE_ChEMBL.txt'):
         tokenizer = SMILES_SPE_Tokenizer(vocab_file=vocab_file, spe_file= spe_file)
         return tokenizer
-    
+
     def setup_loaders(self):
-        self.train_ds, self.eval_ds, test_loader = create_improved_data_loaders(
-                            plinder_output_dir=self.plinder_output_dir,
-                            plinder_data_dir=self.plinder_data_dir,
-                            max_samples=self.cfg.training.max_samples,
-                            batch_size=self.cfg.training.batch_size,
-                            num_workers=1,
-                            train_ratio=self.cfg.data.train_ratio,
-                            val_ratio=self.cfg.data.val_ratio,
-                            max_protein_len=self.cfg.data.max_protein_len,
-                            max_ligand_len=self.cfg.data.max_ligand_len,
-                            use_structure=self.cfg.data.use_structure,
-                            seed=self.seed,
-                            force_reprocess=False,
-                            )
+        self.train_ds, self.eval_ds, test_loader = ddp_data_loaders(
+                                                            data_file=self.datafile,
+                                                            max_samples=self.cfg.training.max_samples,
+                                                            batch_size=self.cfg.training.batch_size,
+                                                            num_workers=1,
+                                                            train_ratio=self.cfg.data.train_ratio,
+                                                            val_ratio=self.cfg.data.val_ratio,
+                                                            max_protein_len=self.cfg.data.max_protein_len,
+                                                            max_ligand_len=self.cfg.data.max_ligand_len,
+                                                            use_structure=self.cfg.data.use_structure,
+                                                            seed=self.seed,
+                                                            force_reprocess=False,
+                                                            )
 
     def load_model(
             self,
@@ -188,6 +194,7 @@ class Train_pl_sedd:
         
         # build score model
         self.score_model = SEDD(self.cfg).to(self.device)
+        self.score_model = DDP(self.score_model, device_ids = [self.local_rank], output_device = self.local_rank)
         self.ema = ExponentialMovingAverage(
             self.score_model.parameters(), decay=self.cfg.training.ema)
         self.noise = noise_lib.get_noise(self.cfg).to(self.device)
@@ -210,16 +217,17 @@ class Train_pl_sedd:
         self.initial_step = int(self.state['step'])
                         
     def train(self, wandbproj, wandbname): 
-        run = wandb.init(
-            # Set the wandb entity where your project will be logged (generally your team name).
-            entity="avasan",
-            # Set the wandb project where this run will be logged.
-            project=wandbproj, #"protein-lig-sedd",
-            # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
-            name=wandbname, #f"experiment_run_1",
-            # Track hyperparameters and run metadata.
-            config=self.cfg.dictionary
-        )
+        if dist.get_rank() == 0:
+            run = wandb.init(
+                # Set the wandb entity where your project will be logged (generally your team name).
+                entity="avasan",
+                # Set the wandb project where this run will be logged.
+                project=wandbproj, #"protein-lig-sedd",
+                # We pass a run name (otherwise it’ll be randomly assigned, like sunshine-lollypop-10)
+                name=wandbname, #f"experiment_run_1",
+                # Track hyperparameters and run metadata.
+                config=self.cfg.dictionary
+            )
 
         self.cfg.optim.lr = float(self.cfg.optim.lr)
         self.setup_loaders()
@@ -239,7 +247,8 @@ class Train_pl_sedd:
         print(f"Training for {self.cfg.training.epochs} epochs or {num_train_steps} steps.")
 
         step = self.state['step']
-        for ep in range(self.cfg.training.epochs):
+        for ep in tqdm(range(self.cfg.training.epochs)):
+            train_sampler.set_epoch(epoch)  # Ensures data is shuffled differently each epoch
             train_iter = iter(self.train_ds)  # Reset iterator at start of epoch
             while True:
                 if step >= num_train_steps:
@@ -252,6 +261,8 @@ class Train_pl_sedd:
                         batch_lig_seq = batch_tot['ligand_smiles']
                         batch_prot_seq = batch_tot['protein_seq']
                         #print(batch_prot_seq)
+                        print(batch_prot_seq)
+                        print(batch_lig_seq)
                         batch_lig, batch_prot, mol_cond, esm_cond = self.embedding_mol_prot.process_embeddings(
                             batch_prot_seq,
                             batch_lig_seq)
@@ -271,17 +282,18 @@ class Train_pl_sedd:
                     break
 
                 loss = train_step_fn(self.state, batch, esm_cond=esm_cond, mol_cond=mol_cond)
+                dist.all_reduce(loss, op=dist.ReduceOp.AVG)
                 step = self.state['step']
+                if dist.get_rank() == 0:
+                    # Logging and checkpointing
+                    wandb.log({"training_loss": loss.item()})
+                    if step % self.cfg.training.log_freq == 0:
+                        print(f"epoch: {ep}, step: {step}, training_loss: {loss.item():.5e}")
 
-                # Logging and checkpointing
-                wandb.log({"training_loss": loss.item()})
-                if step % self.cfg.training.log_freq == 0:
-                    print(f"epoch: {ep}, step: {step}, training_loss: {loss.item():.5e}")
+                    if step % self.cfg.training.snapshot_freq_for_preemption == 0:
+                        utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check.pth', self.state)
 
-                if step % self.cfg.training.snapshot_freq_for_preemption == 0:
-                    utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check.pth', self.state)
-
-                if step % self.cfg.training.eval_freq == 0:
+                if False:#step % self.cfg.training.eval_freq == 0:
                     eval_iter = iter(self.eval_ds)
                     try:
                         if self.cfg.data.valid != "text8":
@@ -305,12 +317,14 @@ class Train_pl_sedd:
                         wandb.log({"evaluation_loss": eval_loss.item()})
 
 
-                if (step > 0 and step % self.cfg.training.snapshot_freq == 0) or step == num_train_steps:
+
+                if dist.get_rank() == 0 and ((step > 0 and step % self.cfg.training.snapshot_freq == 0) or step == num_train_steps):
                     save_step = step // self.cfg.training.snapshot_freq
                     utils.save_checkpoint(os.path.join(self.checkpoint_dir, f'checkpoint_{save_step}.pth'), self.state)
 
 
-        wandb.finish()
+        if dist.get_rank() == 0:
+            wandb.finish()
 
 def run_train(
         work_dir,
@@ -318,20 +332,17 @@ def run_train(
         wandbname,
         cfg_fil=None,
         cfg_dict=None,
-        plinder_output_dir = './plinder_10k/processed_plinder_data',
-        plinder_data_dir='./plinder_10k/processed_plinder_data',
+        datafile = './input_data/merged_plinder.pt',
         mol_emb_id = "ibm/MoLFormer-XL-both-10pct",
         prot_emb_id = "facebook/esm2_t30_150M_UR50D",
         dev_id = "cuda:0",
         seed=42):
         #epochs=10, max_samples=1000000, batch_size=32, num_workers=1, train_ratio=0.8, val_ratio=0.1, max_protein_len=1024, max_ligand_len=128, use_structure=False, seed=42, force_reprocess=False):
-
     trainer_object= Train_pl_sedd(
                         work_dir = work_dir,
                         cfg_fil = cfg_fil,
                         cfg_dict = cfg_dict,
-                        plinder_output_dir = plinder_output_dir,
-                        plinder_data_dir = plinder_data_dir,
+                        datafile = datafile,
                         mol_emb_id = mol_emb_id,
                         prot_emb_id = prot_emb_id,
                         dev_id = dev_id,
@@ -348,8 +359,7 @@ def main():
     parser.add_argument('-cf', '--config_file', type=str, default='configs/config.yaml', help='Yaml file with arguments')
     parser.add_argument('-wp', '--wandbproj', type=str, default='protlig_sedd', help='WandB project')
     parser.add_argument('-wn', '--wandbname', type=str, default='run1', help='WandB name')
-    parser.add_argument('-po', '--plinder_output_dir', type=str, default='./plinder_10k/processed_plinder_data', help='where to output processed plinder data')
-    parser.add_argument('-pd', '--plinder_data_dir', type=str, default='./plinder_10k/processed_plinder_data', help='where to output processed plinder data')
+    parser.add_argument('-df', '--datafile', type=str, default='./input_data/merged_plinder.pt', help='input plinder data')
     parser.add_argument('-me', '--mol_emb_id', type=str, default="ibm/MoLFormer-XL-both-10pct", help='model for mol embedding')
     parser.add_argument('-pe', '--prot_emb_id', type=str, default="facebook/esm2_t30_150M_UR50D", help='model for protein embedding')
     parser.add_argument('-di', '--dev_id', type=str, default='cuda:0', help='device')
@@ -362,8 +372,7 @@ def main():
         wandbproj=args.wandbproj,
         wandbname=args.wandbname,
         cfg_fil=args.config_file,
-        plinder_output_dir=args.plinder_output_dir,
-        plinder_data_dir=args.plinder_data_dir,
+        datafile=args.datafile,
         mol_emb_id=args.mol_emb_id,
         prot_emb_id=args.prot_emb_id,
         dev_id=args.dev_id,
@@ -380,15 +389,119 @@ if __name__ == '__main__':
 
 
 
-# def setup_stuff(work_dir):
-#     sample_dir = os.path.join(work_dir, "samples")
-#     checkpoint_dir = os.path.join(work_dir, "checkpoints")
-#     checkpoint_meta_dir = os.path.join(work_dir, "checkpoints-meta", "checkpoint.pth")
-#     os.makedirs(sample_dir, exist_ok = True)
-#     os.makedirs(checkpoint_dir, exist_ok = True)
-#     os.makedirs(checkpoint_meta_dir, exist_ok = True)
-#     device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
-#     return sample_dir, checkpoint_dir, checkpoint_meta_dir, device
 
-# #def training()
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+if False:
+    import os
+    import torch
+    import torch.distributed as dist
+    from torch.nn.parallel import DistributedDataParallel as DDP
+    from torch.utils.data import DataLoader, DistributedSampler
+    import wandb
+    
+    # -----------------------
+    # Setup DDP
+    # -----------------------
+    local_rank = int(os.environ['LOCAL_RANK'])
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend='nccl')
+    device = torch.device(f'cuda:{local_rank}')
+    
+    # -----------------------
+    # Initialize W&B (only on rank 0)
+    # -----------------------
+    if dist.get_rank() == 0:
+        wandb.init(project="discrete-diffusion", name="cosine_scheduler_ddp")
+    
+    # -----------------------
+    # Dataset and Dataloader
+    # -----------------------
+    train_dataset = MyDataset()
+    train_sampler = DistributedSampler(train_dataset)
+    train_loader = DataLoader(train_dataset, batch_size=32, sampler=train_sampler)
+    
+    # -----------------------
+    # Model and optimizer
+    # -----------------------
+    model = MyDiffusionModel().to(device)
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    
+    # -----------------------
+    # Training Loop
+    # -----------------------
+    num_epochs = 10
+    num_timesteps = model.num_timesteps  # or however many timesteps your model has
+    
+    for epoch in range(num_epochs):
+        train_sampler.set_epoch(epoch)
+        
+        # Accumulate per-timestep metrics
+        epoch_loss_t = torch.zeros(num_timesteps, device=device)
+        epoch_acc_t = torch.zeros(num_timesteps, device=device)
+        count_t = torch.zeros(num_timesteps, device=device)
+        
+        for batch in train_loader:
+            optimizer.zero_grad()
+            batch = batch.to(device)
+            
+            # Forward pass
+            loss_t, pred_t, target_t = model(batch)  
+            # loss_t: [num_timesteps]
+            # pred_t: [batch_size, seq_len, num_classes] per timestep
+            # target_t: [batch_size, seq_len] per timestep
+    
+            # Backward and step
+            total_loss = loss_t.mean()
+            total_loss.backward()
+            optimizer.step()
+            
+            # Per-timestep accuracy
+            pred_classes = pred_t.argmax(dim=-1)  # [batch, seq_len]
+            acc_t = (pred_classes == target_t).float().mean(dim=1)  # mean over seq_len
+            
+            # Accumulate metrics
+            epoch_loss_t += loss_t.detach()
+            epoch_acc_t += acc_t.detach()
+            count_t += 1
+    
+        # Average across batches
+        epoch_loss_t /= count_t
+        epoch_acc_t /= count_t
+        
+        # Reduce across GPUs
+        dist.all_reduce(epoch_loss_t, op=dist.ReduceOp.SUM)
+        dist.all_reduce(epoch_acc_t, op=dist.ReduceOp.SUM)
+        epoch_loss_t /= dist.get_world_size()
+        epoch_acc_t /= dist.get_world_size()
+        
+        # Log to W&B (only on rank 0)
+        if dist.get_rank() == 0:
+            timestep_table = wandb.Table(columns=["timestep", "loss", "accuracy"])
+            for t in range(num_timesteps):
+                timestep_table.add_data(int(t), float(epoch_loss_t[t]), float(epoch_acc_t[t]))
+            wandb.log({
+                "epoch": epoch,
+                "timestep_metrics": timestep_table,
+                "overall_loss": float(epoch_loss_t.mean()),
+                "overall_accuracy": float(epoch_acc_t.mean())
+            })
+    

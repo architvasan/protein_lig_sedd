@@ -7,7 +7,7 @@ WORK_DIR=/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/protein_li
 ENV_DIR=$WORK_DIR/prot_lig_sedd
 CONFIG_FILE=$WORK_DIR/configs/config.yaml
 WANDBPROJ=protlig_sedd
-WANDBNAME=run1_081225
+WANDBNAME=run1_081525
 PLINDER_OUTPUT_DIR=$WORK_DIR/plinder_10k/processed_plinder_data
 PLINDER_DATA_DIR=$WORK_DIR/plinder_10k/processed_plinder_data
 MOL_EMB_ID=ibm/MoLFormer-XL-both-10pct
@@ -28,7 +28,7 @@ source ${ENV_DIR}/bin/activate
 #######################
 #### RUNNING TRAINING WITH VARIABLES###
 #####################
-python -m protlig_dd.training.run_train_protlig_condition \
+CUDA_VISIBLE_DEVICES=1 python -m protlig_dd.training.run_train_protlig_condition \
     -WD $WORK_DIR\
     -cf $CONFIG_FILE\
     -wp $WANDBPROJ\

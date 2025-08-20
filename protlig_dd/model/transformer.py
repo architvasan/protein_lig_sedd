@@ -204,6 +204,7 @@ class EmbeddingLayer(nn.Module):
 
         #self.embedding = nn.Parameter(torch.empty((vocab_dim, dim)))#(vocab_dim+1, dim)))
         #torch.nn.init.xavier_uniform_(self.embedding)
+        #torch.nn.init.uniform_(self.embedding)
         #torch.nn.init.kaiming_uniform_(self.embedding, a=math.sqrt(5))
 
     def forward(self, x):
@@ -280,7 +281,7 @@ class SEDD(nn.Module, PyTorchModelHubMixin):
         #print(esm_cond.size())
         x = self.vocab_embed(indices)
         #print("vocab embedded")
-        #print(x.size())
+        print(f"{x.size()=}")
         c = F.silu(self.sigma_map(sigma))
 
 

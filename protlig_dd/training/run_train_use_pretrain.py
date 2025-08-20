@@ -16,6 +16,7 @@ import protlig_dd.sampling.sampling as sampling
 import protlig_dd.processing.graph_lib as graph_lib
 import protlig_dd.processing.noise_lib as noise_lib
 import protlig_dd.utils.utils as utils
+import protlig_dd.utils.load_model as load_model_utils
 from protlig_dd.model import SEDD
 from protlig_dd.model.ema import ExponentialMovingAverage
 from transformers import GPT2TokenizerFast, GPT2LMHeadModel
@@ -183,6 +184,7 @@ class Train_pl_sedd:
     def load_model(
             self,
             ):
+
         # build token graph
         self.graph = graph_lib.get_graph(self.cfg, self.device)
         

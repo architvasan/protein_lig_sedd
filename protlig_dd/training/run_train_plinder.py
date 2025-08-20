@@ -21,7 +21,7 @@ from protlig_dd.model.ema import ExponentialMovingAverage
 from transformers import GPT2TokenizerFast, GPT2LMHeadModel
 from SmilesPE.tokenizer import *
 #from smallmolec_campaign.utils.smiles_pair_encoders_functions import *
-from protlig_dd.data.updated_data_pipeline import create_improved_data_loaders
+from protlig_dd.data.process_full_plinder import create_improved_data_loaders
 from dataclasses import dataclass
 import yaml
 import inspect
@@ -123,10 +123,9 @@ class Train_pl_sedd:
         grad_clip: 1.
     """
     work_dir: str
+    datafile: str
     cfg_fil: str | None = None # either yaml file or dict
     cfg_dict: object | None = None
-    plinder_output_dir: str='./plinder'
-    plinder_data_dir:str ='./plinder'
     mol_emb_id: str = "ibm/MoLFormer-XL-both-10pct"
     prot_emb_id: str = "facebook/esm2_t30_150M_UR50D"
     dev_id: str = 'cuda:0'
@@ -156,29 +155,27 @@ class Train_pl_sedd:
         self.device = torch.device(self.dev_id)
         #f"cuda:0" if torch.cuda.is_available() else "cpu")
 
-
     @staticmethod
     def smilespetok(
             vocab_file = '../../VocabFiles/vocab_spe.txt',
             spe_file = '../../VocabFiles/SPE_ChEMBL.txt'):
         tokenizer = SMILES_SPE_Tokenizer(vocab_file=vocab_file, spe_file= spe_file)
         return tokenizer
-    
+
     def setup_loaders(self):
         self.train_ds, self.eval_ds, test_loader = create_improved_data_loaders(
-                            plinder_output_dir=self.plinder_output_dir,
-                            plinder_data_dir=self.plinder_data_dir,
-                            max_samples=self.cfg.training.max_samples,
-                            batch_size=self.cfg.training.batch_size,
-                            num_workers=1,
-                            train_ratio=self.cfg.data.train_ratio,
-                            val_ratio=self.cfg.data.val_ratio,
-                            max_protein_len=self.cfg.data.max_protein_len,
-                            max_ligand_len=self.cfg.data.max_ligand_len,
-                            use_structure=self.cfg.data.use_structure,
-                            seed=self.seed,
-                            force_reprocess=False,
-                            )
+                                                            data_file=self.datafile,
+                                                            max_samples=self.cfg.training.max_samples,
+                                                            batch_size=self.cfg.training.batch_size,
+                                                            num_workers=1,
+                                                            train_ratio=self.cfg.data.train_ratio,
+                                                            val_ratio=self.cfg.data.val_ratio,
+                                                            max_protein_len=self.cfg.data.max_protein_len,
+                                                            max_ligand_len=self.cfg.data.max_ligand_len,
+                                                            use_structure=self.cfg.data.use_structure,
+                                                            seed=self.seed,
+                                                            force_reprocess=False,
+                                                            )
 
     def load_model(
             self,
@@ -318,20 +315,17 @@ def run_train(
         wandbname,
         cfg_fil=None,
         cfg_dict=None,
-        plinder_output_dir = './plinder_10k/processed_plinder_data',
-        plinder_data_dir='./plinder_10k/processed_plinder_data',
+        datafile = './input_data/merged_plinder.pt',
         mol_emb_id = "ibm/MoLFormer-XL-both-10pct",
         prot_emb_id = "facebook/esm2_t30_150M_UR50D",
         dev_id = "cuda:0",
         seed=42):
         #epochs=10, max_samples=1000000, batch_size=32, num_workers=1, train_ratio=0.8, val_ratio=0.1, max_protein_len=1024, max_ligand_len=128, use_structure=False, seed=42, force_reprocess=False):
-
     trainer_object= Train_pl_sedd(
                         work_dir = work_dir,
                         cfg_fil = cfg_fil,
                         cfg_dict = cfg_dict,
-                        plinder_output_dir = plinder_output_dir,
-                        plinder_data_dir = plinder_data_dir,
+                        datafile = datafile,
                         mol_emb_id = mol_emb_id,
                         prot_emb_id = prot_emb_id,
                         dev_id = dev_id,
@@ -348,8 +342,7 @@ def main():
     parser.add_argument('-cf', '--config_file', type=str, default='configs/config.yaml', help='Yaml file with arguments')
     parser.add_argument('-wp', '--wandbproj', type=str, default='protlig_sedd', help='WandB project')
     parser.add_argument('-wn', '--wandbname', type=str, default='run1', help='WandB name')
-    parser.add_argument('-po', '--plinder_output_dir', type=str, default='./plinder_10k/processed_plinder_data', help='where to output processed plinder data')
-    parser.add_argument('-pd', '--plinder_data_dir', type=str, default='./plinder_10k/processed_plinder_data', help='where to output processed plinder data')
+    parser.add_argument('-df', '--datafile', type=str, default='./input_data/merged_plinder.pt', help='input plinder data')
     parser.add_argument('-me', '--mol_emb_id', type=str, default="ibm/MoLFormer-XL-both-10pct", help='model for mol embedding')
     parser.add_argument('-pe', '--prot_emb_id', type=str, default="facebook/esm2_t30_150M_UR50D", help='model for protein embedding')
     parser.add_argument('-di', '--dev_id', type=str, default='cuda:0', help='device')
@@ -362,8 +355,7 @@ def main():
         wandbproj=args.wandbproj,
         wandbname=args.wandbname,
         cfg_fil=args.config_file,
-        plinder_output_dir=args.plinder_output_dir,
-        plinder_data_dir=args.plinder_data_dir,
+        datafile=args.datafile,
         mol_emb_id=args.mol_emb_id,
         prot_emb_id=args.prot_emb_id,
         dev_id=args.dev_id,
@@ -372,10 +364,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-
 
 
 
