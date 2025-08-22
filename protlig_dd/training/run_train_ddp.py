@@ -293,7 +293,7 @@ class Train_pl_sedd:
                     if step % self.cfg.training.snapshot_freq_for_preemption == 0:
                         utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check.pth', self.state)
 
-                if False:#step % self.cfg.training.eval_freq == 0:
+                if step % self.cfg.training.eval_freq == 0:
                     eval_iter = iter(self.eval_ds)
                     try:
                         if self.cfg.data.valid != "text8":
