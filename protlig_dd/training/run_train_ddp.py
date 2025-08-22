@@ -10,7 +10,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler
-
+from tqdm import tqdm
 import protlig_dd.data as data
 import protlig_dd.processing.losses as losses
 import protlig_dd.sampling.sampling as sampling
@@ -248,7 +248,7 @@ class Train_pl_sedd:
 
         step = self.state['step']
         for ep in tqdm(range(self.cfg.training.epochs)):
-            train_sampler.set_epoch(epoch)  # Ensures data is shuffled differently each epoch
+            self.train_sampler.set_epoch(ep)  # Ensures data is shuffled differently each epoch
             train_iter = iter(self.train_ds)  # Reset iterator at start of epoch
             while True:
                 if step >= num_train_steps:
