@@ -75,7 +75,7 @@ class TestModel:
                                         self.cfg,
                                         self.graph, 
                                         self.noise, 
-                                        (self.cfg.training.batch_size // (self.cfg.ngpus * self.cfg.training.accum), self.cfg.model.length), 
+                                        (2, self.cfg.model.length),#(self.cfg.training.batch_size // (self.cfg.ngpus * self.cfg.training.accum), self.cfg.model.length), 
                                         self.sampling_eps, 
                                         self.device)
 
@@ -107,6 +107,65 @@ samples = tester.sample()
 print(samples)
 for i, sample in enumerate(samples):
     print(f"Sample {i}: {sample.tolist()}")
+
+'''
+Below is my attempt to decode the samples into SMILES and protein sequences... However, it gives something weird like:
+Generated Ligand (SMILES):
+2111c11c[GaH4-]c1[Co+2][123Sn]111n211[Fm]([TiH+3][86Sr][B-][64Zn][Nd]1c[Ti+2][82Kr]1[207Pb]1[RuH2+2]1[68Ge]c1111[CeH3]1231141[C@@H]1111(2121c[98Tc+4]2(1n[Na+][27Al]1[n+]1c((111111111c2(2c11(111[34SH]111[SnH]1[139La]cc1nNo[144Ce]11[235U+2].1[SnH4+2][Rh+2][150Pm]12n[12C][P-3][238Th]
+
+Generated Protein Sequence:
+- X O
+
+I think it has something to do with the tokenizers? Because I think tester.cfg.data.max_ligand_len and tester.cfg.data.max_protein_len are not set correctly.
+In that case, it would be the tokenizers are not configured properly to decodes SMILES and protein sequences.
+'''
+
+from transformers import AutoTokenizer
+
+MOL_MODEL_ID = "ibm/MoLFormer-XL-both-10pct"
+PROT_MODEL_ID = "facebook/esm2_t30_150M_UR50D"
+PROTEIN_TOKEN_OFFSET = 2363
+
+print("\n[Step 1] Loading MoLFormer and ESM2 tokenizers...")
+mol_tokenizer = AutoTokenizer.from_pretrained(MOL_MODEL_ID, trust_remote_code=True)
+protein_tokenizer = AutoTokenizer.from_pretrained(PROT_MODEL_ID)
+
+# --- 2. Separate ligand and protein parts from the 'samples' tensor ---
+# These length values must exactly match the settings in your config.yaml
+max_ligand_len = tester.cfg.data.max_ligand_len   # e.g., 128
+max_protein_len = tester.cfg.data.max_protein_len # e.g., 1024
+total_len = tester.cfg.model.length             # e.g., 1088
+
+print(f"\n[Step 2] Separating Ligand and Protein Token IDs...")
+print(f"-> Total length: {total_len}, Ligand length: {max_ligand_len}, Protein length: {max_protein_len}")
+
+for i in range(len(samples)):
+    sample_ids = samples[i]
+
+    ligand_ids = sample_ids[:max_ligand_len]
+    protein_ids_with_offset = sample_ids[max_ligand_len:total_len]
+
+    # --- 3. Decode the protein sequence ---
+    # This is the most crucial step: subtract the offset to restore the original ESM2 Token IDs.
+    protein_ids = protein_ids_with_offset - PROTEIN_TOKEN_OFFSET
+
+    # The tokenizer's decode method with skip_special_tokens=True will automatically clean up [PAD], [CLS], etc.
+    # clamp(min=0) is a safety measure to prevent negative IDs from causing an error after subtraction.
+    protein_sequence = protein_tokenizer.decode(
+        protein_ids.clamp(min=0), 
+        skip_special_tokens=True
+    )
+    # --- 4. Decode the ligand SMILES ---
+    # The ligand part does not require any offset adjustment.
+    ligand_smiles = mol_tokenizer.decode(
+        ligand_ids, 
+        skip_special_tokens=True
+    )
+    ligand_smiles_cleaned = ligand_smiles.replace(" ", "")
+
+    # --- 5. Display the final results ---
+    print(f"\nGenerated Ligand (SMILES):\n{ligand_smiles_cleaned}")
+    print(f"\nGenerated Protein Sequence:\n{protein_sequence}")
 
 if False:
     #model = SEDD.from_pretrained(model_path=checkpoint["model"], device=device, cfg=cfg)
