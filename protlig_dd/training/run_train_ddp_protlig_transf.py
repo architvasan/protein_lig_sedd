@@ -18,7 +18,6 @@ import protlig_dd.processing.graph_lib as graph_lib
 import protlig_dd.processing.noise_lib as noise_lib
 import protlig_dd.utils.utils as utils
 from protlig_dd.model import SEDD
-from protlig_dd.model.transformer_cond import ProteinLigandSharedDiffusion
 from protlig_dd.model.ema import ExponentialMovingAverage
 from transformers import GPT2TokenizerFast, GPT2LMHeadModel
 from SmilesPE.tokenizer import *
