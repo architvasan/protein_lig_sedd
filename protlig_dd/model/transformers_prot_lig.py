@@ -98,99 +98,7 @@ class LabelEmbedder(nn.Module):
         embeddings = self.embedding_table(labels)
         return embeddings
 
-@dataclass
-class DDiTBlock(nn.Module):
-    dim: int
-    n_heads: int
-    dropout: float
-    cond_dim: Optional[int] = None
-    mlp_ratio: int = 4
 
-    def __post_init__(self):
-        super().__init__()
-        self.norm1 = LayerNorm(self.dim)
-
-        # qkv projection ( needed for rotary)
-        self.attn_qkv = nn.Linear(d_model, 3 * d_model)
-        self.attn = nn.MultiheadAttention(self.dim, self.n_heads, dropout=self.dropout, batch_first=True)
-        self.attn_out = nn.Linear(d_model, d_model)
-
-        self.dropout1 = nn.Dropout(self.dropout)
-
-        self.norm2 = LayerNorm(self.dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(self.dim, self.dim * self.mlp_ratio, bias = True),
-            nn.GELU(approximate='tanh'),
-            nn.Linear(self.dim * self.mlp_ratio, self.dim, bias = True),
-        )
-        self.dropout2 = nn.Dropout(self.dropout)
-
-        self.adaLN_modulation = nn.Linear(cond_dim, 6 * dim, bias=True)
-        self.adaLN_modulation.weight.data.zero_()
-        self.adaLN_modulation.bias.data.zero_()
-
-        if self.cond_dim is not None:
-            self.cond_proj = nn.Linear(self.cond_dim, self.dim * 2)
-
-    def _get_bias_dropout_scale(self):
-        return (
-            bias_dropout_add_scale_fused_train
-            if self.training
-            else bias_dropout_add_scale_fused_inference
-        )
-
-    def forward(self, x, rotary_cos_sin, c, seqlens=None):
-        batch_size, seq_len = x.shape[0], x.shape[1]
-
-        bias_dropout_scale_fn = self._get_bias_dropout_scale()
-
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c)[:, None].chunk(6, dim=2)
-
-        # attention operation
-        x_skip = x
-        x = modulate_fused(self.norm1(x), shift_msa, scale_msa)
-        # dtype0 = x.dtype
-        #print(x.size())
-        qkv = self.attn_qkv(x)
-        qkv = rearrange(qkv, 'b s (three h d) -> b s three h d', three=3, h=self.n_heads)
-
-        with torch.cuda.amp.autocast(enabled=False):
-            cos, sin = rotary_cos_sin
-            qkv = rotary.apply_rotary_pos_emb(
-                qkv, cos.to(qkv.dtype), sin.to(qkv.dtype)
-            )
-        
-        # split q, k, v and merge heads
-        q, k, v = qkv.unbind(dim=2)  # each [b, s, h, d]
-        q = rearrange(q, "b s h d -> s b (h d)")
-        k = rearrange(k, "b s h d -> s b (h d)")
-        v = rearrange(v, "b s h d -> s b (h d)")
-
-        # run MultiheadAttention
-        attn_out, _ = self.attn(q, k, v)  # [s, b, d_model]
-        attn_out = attn_out.transpose(0, 1)  # [b, s, d_model]
-
-        ## back to [b, s, d]
-        #attn_out = attn_out.transpose(0, 1)  # [b, s, d_model]
-
-        #qkv = rearrange(qkv, 'b s ... -> (b s) ...')
-        #if seqlens is None:
-        #    cu_seqlens = torch.arange(
-        #        0, (batch_size + 1) * seq_len, step=seq_len,
-        #        dtype=torch.int32, device=qkv.device
-        #    )
-        #else:
-        #    cu_seqlens = seqlens.cumsum(-1)
-        #x = flash_attn_varlen_qkvpacked_func(
-        #    qkv, cu_seqlens, seq_len, 0., causal=False)
-
-        #x = rearrange(x, '(b s) h d -> b s (h d)', b=batch_size)
-
-        x = bias_dropout_scale_fn(self.attn_out(attn_out), None, gate_msa, x_skip, self.dropout)
-
-        # mlp operation
-        x = bias_dropout_scale_fn(self.mlp(modulate_fused(self.norm2(x), shift_mlp, scale_mlp)), None, gate_mlp, x, self.dropout)
-        return x
 
 
 class EmbeddingLayer(nn.Module):
@@ -304,8 +212,8 @@ class LigandEncoderMolformer(nn.Module):
     def __init__(self, model_name: str = "ibm-research/MoLFormer-XL-both-10pct", device="cuda"):
         super().__init__()
         from transformers import AutoTokenizer, AutoModel
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        self.model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
         self.model.eval()
         self.device = device
         self.model.to(device)
@@ -321,8 +229,9 @@ class LigandEncoderMolformer(nn.Module):
         """
         toks = self.tokenizer(
             smiles_list,
-            padding=True,
+            padding='max_length',
             truncation=True,
+            max_length=202,
             return_tensors="pt",
         )
         toks = {k: v.to(self.device) for k, v in toks.items()}
@@ -367,7 +276,7 @@ class CrossAttentionBlock(nn.Module):
     """
     def __init__(self, d_model, n_heads, d_ff):
         super().__init__()
-        self.self_attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
+        #self.self_attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
         self.cross_attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
         self.ff = nn.Sequential(
             nn.Linear(d_model, d_ff),
@@ -376,19 +285,18 @@ class CrossAttentionBlock(nn.Module):
         )
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
-        self.norm3 = nn.LayerNorm(d_model)
 
     def forward(self, x, x_mask=None, cond=None, cond_mask=None):
         # Self-attention
-        x_res = x
-        x = self.norm1(x)
-        x_sa, _ = self.self_attn(x, x, x, key_padding_mask=(~x_mask) if x_mask is not None else None)
-        x = x_res + x_sa
+        #x_res = x
+        #x = self.norm1(x)
+        #x_sa, _ = self.self_attn(x, x, x, key_padding_mask=(~x_mask) if x_mask is not None else None)
+        #x = x_res + x_sa
 
         # Cross-attention (if cond provided)
         if cond is not None:
             x_res = x
-            x_norm = self.norm2(x)
+            x_norm = self.norm1(x)
             cond_kv = cond
             x_ca, _ = self.cross_attn(
                 x_norm, cond_kv, cond_kv,
@@ -402,6 +310,102 @@ class CrossAttentionBlock(nn.Module):
         x = x_res + self.ff(x)
         return x
 
+class DDiTBlock(nn.Module):
+
+    def __init__(self, dim, n_heads, dropout, cond_dim, mlp_ratio=4):
+        super().__init__()
+
+        self.dim = dim
+        self.n_heads = n_heads
+        self.dropout = dropout
+        self.cond_dim = cond_dim
+        self.mlp_ratio = mlp_ratio
+        self.norm1 = LayerNorm(self.dim)
+
+        # qkv projection ( needed for rotary)
+        self.attn_qkv = nn.Linear(self.dim, 3 * self.dim)
+        self.attn = nn.MultiheadAttention(self.dim, self.n_heads, dropout=self.dropout, batch_first=True)
+        self.attn_out = nn.Linear(self.dim, self.dim)
+
+        self.cross_attn = CrossAttentionBlock(self.dim, self.n_heads, self.dim)
+        self.dropout1 = nn.Dropout(self.dropout)
+
+        self.norm2 = LayerNorm(self.dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(self.dim, self.dim * self.mlp_ratio, bias = True),
+            nn.GELU(approximate='tanh'),
+            nn.Linear(self.dim * self.mlp_ratio, self.dim, bias = True),
+        )
+        self.dropout2 = nn.Dropout(self.dropout)
+
+        self.adaLN_modulation = nn.Linear(self.cond_dim, 6 * self.dim, bias=True)
+        self.adaLN_modulation.weight.data.zero_()
+        self.adaLN_modulation.bias.data.zero_()
+
+        #if self.cond_dim is not None:
+        #    self.cond_proj = nn.Linear(self.cond_dim, self.dim * 2)
+
+    def _get_bias_dropout_scale(self):
+        return (
+            bias_dropout_add_scale_fused_train
+            if self.training
+            else bias_dropout_add_scale_fused_inference
+        )
+
+    def forward(self, x, rotary_cos_sin, c, seqlens=None, cond=None):
+        batch_size, seq_len = x.shape[0], x.shape[1]
+
+        bias_dropout_scale_fn = self._get_bias_dropout_scale()
+
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c)[:, None].chunk(6, dim=2)
+
+        # attention operation
+        x_skip = x
+        x = modulate_fused(self.norm1(x), shift_msa, scale_msa)
+        # dtype0 = x.dtype
+        #print(x.size())
+        qkv = self.attn_qkv(x)
+        qkv = rearrange(qkv, 'b s (three h d) -> b s three h d', three=3, h=self.n_heads)
+
+        with torch.cuda.amp.autocast(enabled=False):
+            cos, sin = rotary_cos_sin
+            qkv = rotary.apply_rotary_pos_emb(
+                qkv, cos.to(qkv.dtype), sin.to(qkv.dtype)
+            )
+        
+        # split q, k, v and merge heads
+        q, k, v = qkv.unbind(dim=2)  # each [b, s, h, d]
+        q = rearrange(q, "b s h d -> s b (h d)")
+        k = rearrange(k, "b s h d -> s b (h d)")
+        v = rearrange(v, "b s h d -> s b (h d)")
+
+        # run MultiheadAttention
+        attn_out, _ = self.attn(q, k, v)  # [s, b, d_model]
+        attn_out = attn_out.transpose(0, 1)  # [b, s, d_model]
+
+        ## back to [b, s, d]
+        #attn_out = attn_out.transpose(0, 1)  # [b, s, d_model]
+
+        #qkv = rearrange(qkv, 'b s ... -> (b s) ...')
+        #if seqlens is None:
+        #    cu_seqlens = torch.arange(
+        #        0, (batch_size + 1) * seq_len, step=seq_len,
+        #        dtype=torch.int32, device=qkv.device
+        #    )
+        #else:
+        #    cu_seqlens = seqlens.cumsum(-1)
+        #x = flash_attn_varlen_qkvpacked_func(
+        #    qkv, cu_seqlens, seq_len, 0., causal=False)
+
+        #x = rearrange(x, '(b s) h d -> b s (h d)', b=batch_size)
+
+        x = bias_dropout_scale_fn(self.attn_out(attn_out), None, gate_msa, x_skip, self.dropout)
+
+        # mlp operation
+        x = bias_dropout_scale_fn(self.mlp(modulate_fused(self.norm2(x), shift_mlp, scale_mlp)), None, gate_mlp, x, self.dropout)
+
+        x = self.cross_attn(x, x_mask=None, cond=cond, cond_mask=None)
+        return x
 
 # --------- Shared diffusion transformer (token-level) ----------
 class SharedDiffusionTransformer(nn.Module):
@@ -415,47 +419,68 @@ class SharedDiffusionTransformer(nn.Module):
       cond_seq:           [B, Lc, D] conditioning sequence in shared latent space
       t_emb:              [B, D] diffusion timestep embedding (optional)
     """
-    def __init__(self, vocab_size, d_model=512, n_layers=6, n_heads=8, d_ff=2048):
+    def __init__(self, config, tokens):#hidden_size, vocab_size, cond_dim, n_heads, dropout, scale_by_sigma, graph_type = 'absorb'):#self, vocab_size, d_model=512, n_layers=6, n_heads=8, d_ff=2048):
         super().__init__()
-        self.d_model = d_model
-        self.token_emb = nn.Embedding(vocab_size, d_model)
-        self.pos_emb = nn.Parameter(torch.randn(1, 4096, d_model) * 0.01)  # long enough max L
-        self.blocks = nn.ModuleList([CrossAttentionBlock(d_model, n_heads, d_ff) for _ in range(n_layers)])
-        self.to_logits = nn.Linear(d_model, vocab_size)
+        self.config = config
 
-        # Timestep embedding for diffusion (FiLM-style)
-        self.t_mlp = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.GELU(),
-            nn.Linear(d_model, d_model),
+        self.absorb = config.graph.type == "absorb"
+        vocab_size = tokens + (1 if self.absorb else 0) #config.
+        #print(f"{vocab_size=}")
+        self.vocab_embed = EmbeddingLayer(config.model.hidden_size, vocab_size)
+        self.sigma_map = TimestepEmbedder(config.model.cond_dim)
+        self.rotary_emb = rotary.Rotary(config.model.hidden_size // config.model.n_heads)
+
+        #self.esm_proj = nn.Linear(config.model.esm_dim, config.model.cond_dim)# if config.model.use_esm else None
+        #self.mol_proj = nn.Linear(config.model.molformer_dim, config.model.cond_dim)# if config.model.use_molformer else None
+        #self.esm_norm = nn.BatchNorm1d(self.config.model.cond_dim)
+        #self.mol_norm = nn.BatchNorm1d(self.config.model.cond_dim)
+        print(f"{config.model.dropout=}")
+    
+        self.blocks = nn.ModuleList([
+            DDiTBlock(config.model.hidden_size, config.model.n_heads, config.model.dropout, config.model.cond_dim) for _ in range(config.model.n_blocks)
+        ])
+
+        self.output_layer = DDitFinalLayer(config.model.hidden_size, vocab_size, config.model.cond_dim)
+        self.scale_by_sigma = config.model.scale_by_sigma
+    
+    def _get_bias_dropout_scale(self):
+        return (
+            bias_dropout_add_scale_fused_train
+            if self.training
+            else bias_dropout_add_scale_fused_inference
         )
+    def forward(self, indices, sigma, cond_seq=None, src_mask=None, cond_mask=None):
 
-    def forward(self, token_ids, timesteps, cond_seq=None, src_mask=None, cond_mask=None):
-        """
-        token_ids: [B, L] integer tokens (noisy)
-        timesteps: [B] integer or float (diffusion step)
-        cond_seq:  [B, Lc, D] (already in same d_model dim)
-        src_mask:  [B, L] True for real tokens
-        cond_mask: [B, Lc] True for real tokens
-        """
-        B, L = token_ids.shape
-        x = self.token_emb(token_ids)  # [B, L, D]
-        x = x + self.pos_emb[:, :L, :]
+        #print(indices.size)
+        #print("ESM cond")
+        #print(esm_cond.size())
+        x = self.vocab_embed(indices)
+        #print("vocab embedded")
+        print(f"{x.size()=}")
+        c = F.silu(self.sigma_map(sigma))
 
-        # simple sinusoidal or learned t-embedding: map t->R^D and add
-        # Here: just embed t via one-hot-ish linear; for real systems use sinusoidal/MLP.
-        t = timesteps.float().unsqueeze(-1) / (timesteps.max().float().clamp(min=1.0))
-        t = F.pad(t, (0, self.d_model - 1))  # [B, D] very simple placeholder
-        t = self.t_mlp(t)                    # [B, D]
-        x = x + t.unsqueeze(1)
+        #print(c.size())
+        rotary_cos_sin = self.rotary_emb(x)
 
-        h = x
-        for blk in self.blocks:
-            h = blk(h, x_mask=src_mask, cond=cond_seq, cond_mask=cond_mask)
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            for i in range(len(self.blocks)):
+                x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None, cond=cond_seq, cond_mask=cond_mask)
 
-        logits = self.to_logits(h)  # [B, L, vocab]
-        return logits
+            x = self.output_layer(x, c)
 
+        if self.scale_by_sigma:
+            assert self.absorb, "Haven't configured this to work."
+            esigm1_log = torch.where(sigma < 0.5, torch.expm1(sigma), sigma.exp() - 1).log().to(x.dtype)[:, None, None]
+            x = x - esigm1_log - np.log(x.shape[-1] - 1)# this will be approximately averaged at 0
+
+        #print("x.shape:", x.shape)
+        #print("indices.shape:", indices.shape)
+        #print("indices.max():", indices.max().item())
+        #print("x.shape[-1]:", x.shape[-1])
+        x = torch.scatter(x, -1, indices[..., None], torch.zeros_like(x[..., :1]))
+        #x = x.index_fill(-1, indices, 0)  # only works if indices are flat and dim matches
+
+        return x
 
 # --------- End-to-end wrapper ----------
 class ProteinLigandSharedDiffusion(nn.Module):
@@ -473,19 +498,22 @@ class ProteinLigandSharedDiffusion(nn.Module):
     """
     def __init__(
         self,
-        esm_variant = "esm2_t33_650M_UR50D",
-        mol_model_id = "ibm/MoLFormer-XL-both-10pct",
-        d_latent=512,
-        vocab_prot=30,    # set your protein vocab size (discrete diffusion tokens)
-        vocab_lig=128,    # set your ligand vocab size
-        n_layers=6, n_heads=8, d_ff=2048, device="cpu"
-    ):
+        config):
+        #d_latent=512,
+        #vocab_prot=30,    # set your protein vocab size (discrete diffusion tokens)
+        #vocab_lig=128,    # set your ligand vocab size
+        #n_layers=6, n_heads=8, d_ff=2048, device="cpu"
+        #):
         super().__init__()
-        self.device = device
+        esm_variant = "esm2_t33_650M_UR50D"
+        mol_model_id = "ibm/MoLFormer-XL-both-10pct"
+
+        self.device = config.model.device
 
         # Encoders
-        self.prot_enc = ProteinEncoderESM(esm_variant, device=device)
-        self.lig_enc  = LigandEncoderMolformer(molformer_ckpt, device=device)
+        
+        self.prot_enc = ProteinEncoderESM(esm_variant="esm2_t33_650M_UR50D", device=self.device) 
+        self.lig_enc  = LigandEncoderMolformer()# device=device) #molformer_ckpt,
 
         # Infer dims by doing tiny dummy forwards (lazy approach) – or set manually if you prefer.
         # We'll do a tiny dry-run on init with simple inputs to grab dims.
@@ -495,17 +523,18 @@ class ProteinLigandSharedDiffusion(nn.Module):
 
         d_prot = p_per.size(-1)
         d_lig  = l_per.size(-1)
-
+        print(f"Protein encoder output dim: {d_prot}")
+        print(f"Ligand encoder output dim: {d_lig}")
         # Projectors to shared latent
-        self.projector = SharedLatentProjector(d_prot, d_lig, d_latent)
+        self.projector = SharedLatentProjector(d_prot, d_lig, config.model.hidden_size)
 
         # Two diffusion heads (one for each vocabulary) sharing the same backbone weights?
         # Option A: single backbone, separate output heads
         self.shared_backbone = nn.ModuleDict({
-            "ligand": SharedDiffusionTransformer(vocab_size=vocab_lig, d_model=d_latent,
-                                                 n_layers=n_layers, n_heads=n_heads, d_ff=d_ff),
-            "protein": SharedDiffusionTransformer(vocab_size=vocab_prot, d_model=d_latent,
-                                                  n_layers=n_layers, n_heads=n_heads, d_ff=d_ff)
+            "ligand": SharedDiffusionTransformer(config, tokens = 2363),#vocab_size=vocab_lig, d_model=d_latent,
+                                                 #n_layers=n_layers, n_heads=n_heads, d_ff=d_ff),
+            "protein": SharedDiffusionTransformer(config, tokens = 33)#vocab_size=vocab_prot, d_model=d_latent,
+                                                  #n_layers=n_layers, n_heads=n_heads, d_ff=d_ff)
         })
 
     def fuse_condition(self, p_seq_lat=None, l_seq_lat=None, p_mask=None, l_mask=None, mode="concat"):
@@ -547,12 +576,12 @@ class ProteinLigandSharedDiffusion(nn.Module):
 
     def forward(
         self,
-        task:str,
         noisy_tokens: torch.Tensor,   # [B, L] ints for the target modality
         timesteps: torch.Tensor,      # [B]
         prot_strs=None,               # List[str] or None
         smiles_list=None,             # List[str] or None
         src_mask=None,                # [B, L] (True=keep) for target tokens
+        task:str = "ligand_given_protein"
     ):
         """
         task: "ligand_given_protein" | "protein_given_ligand" | "joint_ligand" | "joint_protein"
