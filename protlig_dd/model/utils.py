@@ -14,7 +14,7 @@ def get_model_fn(model, train=False):
         A model function.
     """
 
-    def model_fn(x, sigma):
+    def model_fn(x, sigma, prot_seq=None, lig_seq=None, task= "ligand_given_protein"):
         """Compute the output of the score-based model.
 
         Args:
@@ -33,7 +33,7 @@ def get_model_fn(model, train=False):
             # otherwise output the raw values (we handle mlm training in losses.py)
         #print(x, sigma)
         #print(model)
-        return model(x, sigma)
+        return model(x, sigma, prot_seq=prot_seq, lig_seq=lig_seq, task=task)
     return model_fn
 
 
@@ -42,10 +42,10 @@ def get_score_fn(model, train=False, sampling=False):
         assert not train, "Must sample in eval mode"
     model_fn = get_model_fn(model, train=train)
 
-    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-        def score_fn(x, sigma, esm_cond=None, mol_cond=None):
+    with torch.cuda.amp.autocast(dtype=torch.float32):#bfloat16):
+        def score_fn(x, sigma, prot_seq=None, lig_seq=None, task= "ligand_given_protein"):
             sigma = sigma.reshape(-1)
-            score = model_fn(x, sigma, esm_cond, mol_cond)
+            score = model_fn(x, sigma, prot_seq=None, lig_seq=None, task= "ligand_given_protein")
             
             if sampling:
                 # when sampling return true score (not log used for training)
