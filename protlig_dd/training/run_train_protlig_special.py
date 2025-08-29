@@ -17,13 +17,13 @@ import protlig_dd.sampling.sampling as sampling
 import protlig_dd.processing.graph_lib as graph_lib
 import protlig_dd.processing.noise_lib as noise_lib
 import protlig_dd.utils.utils as utils
-from protlig_dd.model import SEDD
-from protlig_dd.model.transformer_cond import ProteinLigandSharedDiffusion
+from protlig_dd.model.transformers_prot_lig import ProteinLigandSharedDiffusion
 from protlig_dd.model.ema import ExponentialMovingAverage
 from transformers import GPT2TokenizerFast, GPT2LMHeadModel
-from SmilesPE.tokenizer import *
+#from SmilesPE.tokenizer import *
 #from smallmolec_campaign.utils.smiles_pair_encoders_functions import *
 from protlig_dd.data.process_full_plinder import ddp_data_loaders
+from protlig_dd.data.tokenize import Tok_Mol, Tok_Prot
 from dataclasses import dataclass
 import yaml
 import inspect
@@ -145,11 +145,13 @@ class Train_pl_sedd:
         self.cfg = Config(
                     yamlfile=self.cfg_fil,
                     dictionary=self.cfg_dict)
-        self.embedding_mol_prot = get_embeddings.Embed_Mol_Prot(self.mol_emb_id, self.prot_emb_id)
+        #self.embedding_mol_prot = get_embeddings.Embed_Mol_Prot(self.mol_emb_id, self.prot_emb_id)
 
         self.sample_dir = os.path.join(self.work_dir, "samples")
         self.checkpoint_dir = os.path.join(self.work_dir, "checkpoints")
         self.checkpoint_meta_dir = os.path.join(self.work_dir, "checkpoints-meta", "checkpoint.pth")
+        self.tokenizer_mol = Tok_Mol(self.mol_emb_id)
+        self.tokenizer_prot = Tok_Prot(self.prot_emb_id)
         os.makedirs(self.sample_dir, exist_ok = True)
         os.makedirs(self.checkpoint_dir, exist_ok = True)
         os.makedirs(self.checkpoint_meta_dir, exist_ok = True)
@@ -164,13 +166,6 @@ class Train_pl_sedd:
         self.device = torch.device(f'cuda:{self.local_rank}')
         if dist.get_rank() == 0:
             wandb.login()
-
-    @staticmethod
-    def smilespetok(
-            vocab_file = '../../VocabFiles/vocab_spe.txt',
-            spe_file = '../../VocabFiles/SPE_ChEMBL.txt'):
-        tokenizer = SMILES_SPE_Tokenizer(vocab_file=vocab_file, spe_file= spe_file)
-        return tokenizer
 
     def setup_loaders(self):
         self.train_ds, self.eval_ds, test_loader = ddp_data_loaders(
@@ -194,7 +189,7 @@ class Train_pl_sedd:
         self.graph = graph_lib.get_graph(self.cfg, self.device)
         
         # build score model
-        self.score_model = SEDD(self.cfg).to(self.device)
+        self.score_model = ProteinLigandSharedDiffusion(self.cfg).to(self.device) #SEDD(self.cfg).to(self.device)
         self.score_model = DDP(self.score_model, device_ids = [self.local_rank], output_device = self.local_rank)
         self.ema = ExponentialMovingAverage(
             self.score_model.parameters(), decay=self.cfg.training.ema)
@@ -257,32 +252,17 @@ class Train_pl_sedd:
                     return  # Exit training early
 
                 try:
-                    if self.cfg.data.train != "text8":
-                        batch_tot = next(train_iter)
-                        batch_lig_seq = batch_tot['ligand_smiles']
-                        batch_prot_seq = batch_tot['protein_seq']
-                        #print(batch_prot_seq)
-                        print(batch_prot_seq)
-                        print(batch_lig_seq)
-                        batch_lig, batch_prot, mol_cond, esm_cond = self.embedding_mol_prot.process_embeddings(
-                            batch_prot_seq,
-                            batch_lig_seq)
-                        batch_lig = batch_lig.to(self.device)
-                        #print(batch_lig)
-                        print(f"{batch_lig['input_ids'].shape=}")
-    
-                        batch_prot = batch_prot.to(self.device)
-                        print(f"{batch_prot['input_ids'].shape=}")
+                    batch_tot = next(train_iter)
+                    batch_lig_seq = batch_tot['ligand_smiles']
+                    batch_prot_seq = batch_tot['protein_seq']
+                    batch_lig = self.tokenizer_mol.tokenize(batch_lig_seq)
+                    batch_prot = self.tokenizer_prot.tokenize(batch_prot_seq)
 
-                        batch = torch.concat([batch_lig['input_ids'], batch_prot['input_ids']+2363], axis=1)
-                        print(f"{batch.shape=}")
-                    else:
-                        batch = next(train_iter).to(self.device)
                 except StopIteration:
                     # End of dataset for this epoch
                     break
 
-                loss = train_step_fn(self.state, batch, esm_cond=esm_cond, mol_cond=mol_cond)
+                loss = train_step_fn(self.state, batch)#, esm_cond=esm_cond, mol_cond=mol_cond)
                 dist.all_reduce(loss, op=dist.ReduceOp.AVG)
                 step = self.state['step']
                 if dist.get_rank() == 0:
