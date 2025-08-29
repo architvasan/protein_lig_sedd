@@ -578,8 +578,8 @@ class ProteinLigandSharedDiffusion(nn.Module):
         self,
         noisy_tokens: torch.Tensor,   # [B, L] ints for the target modality
         timesteps: torch.Tensor,      # [B]
-        prot_strs=None,               # List[str] or None
-        smiles_list=None,             # List[str] or None
+        prot_seq=None,               # List[str] or None
+        lig_seq=None,             # List[str] or None
         src_mask=None,                # [B, L] (True=keep) for target tokens
         task:str = "ligand_given_protein"
     ):
@@ -588,7 +588,7 @@ class ProteinLigandSharedDiffusion(nn.Module):
               For joint, decide which target you are denoising at this step.
         """
         # 1) Encode & project to shared latent
-        p_seq_lat, p_mask, l_seq_lat, l_mask = self.encode_to_latent(prot_strs, smiles_list)
+        p_seq_lat, p_mask, l_seq_lat, l_mask = self.encode_to_latent(prot_seq, lig_seq)
 
         # 2) Build conditioning for the chosen task
         if task == "ligand_given_protein":
