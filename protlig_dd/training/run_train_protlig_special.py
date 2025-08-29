@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 import protlig_dd.data as data
-import protlig_dd.processing.losses as losses
+import protlig_dd.processing.losses_conditional as losses
 import protlig_dd.sampling.sampling as sampling
 import protlig_dd.processing.graph_lib as graph_lib
 import protlig_dd.processing.noise_lib as noise_lib
@@ -22,7 +22,7 @@ from protlig_dd.model.ema import ExponentialMovingAverage
 from transformers import GPT2TokenizerFast, GPT2LMHeadModel
 #from SmilesPE.tokenizer import *
 #from smallmolec_campaign.utils.smiles_pair_encoders_functions import *
-from protlig_dd.data.process_full_plinder import ddp_data_loaders
+from protlig_dd.data.process_full_plinder import create_improved_data_loaders#ddp_data_loaders
 from protlig_dd.data.tokenize import Tok_Mol, Tok_Prot
 from dataclasses import dataclass
 import yaml
@@ -155,20 +155,21 @@ class Train_pl_sedd:
         os.makedirs(self.sample_dir, exist_ok = True)
         os.makedirs(self.checkpoint_dir, exist_ok = True)
         os.makedirs(self.checkpoint_meta_dir, exist_ok = True)
+        self.device = 'cuda'
         #self.device = torch.device(self.dev_id)
         #f"cuda:0" if torch.cuda.is_available() else "cpu")
         # -----------------------
         # Setup DDP
         # -----------------------
-        self.local_rank = int(os.environ['LOCAL_RANK'])
-        torch.cuda.set_device(self.local_rank)
-        dist.init_process_group(backend='nccl')
-        self.device = torch.device(f'cuda:{self.local_rank}')
-        if dist.get_rank() == 0:
-            wandb.login()
+        #self.local_rank = int(os.environ['LOCAL_RANK'])
+        #torch.cuda.set_device(self.local_rank)
+        #dist.init_process_group(backend='nccl')
+        #self.device = torch.device(f'cuda:{self.local_rank}')
+        #if dist.get_rank() == 0:
+        wandb.login()
 
     def setup_loaders(self):
-        self.train_ds, self.eval_ds, test_loader = ddp_data_loaders(
+        self.train_ds, self.eval_ds, test_loader = create_improved_data_loaders(
                                                             data_file=self.datafile,
                                                             max_samples=self.cfg.training.max_samples,
                                                             batch_size=self.cfg.training.batch_size,
@@ -190,7 +191,7 @@ class Train_pl_sedd:
         
         # build score model
         self.score_model = ProteinLigandSharedDiffusion(self.cfg).to(self.device) #SEDD(self.cfg).to(self.device)
-        self.score_model = DDP(self.score_model, device_ids = [self.local_rank], output_device = self.local_rank)
+        #self.score_model = DDP(self.score_model, device_ids = [self.local_rank], output_device = self.local_rank)
         self.ema = ExponentialMovingAverage(
             self.score_model.parameters(), decay=self.cfg.training.ema)
         self.noise = noise_lib.get_noise(self.cfg).to(self.device)
@@ -213,7 +214,7 @@ class Train_pl_sedd:
         self.initial_step = int(self.state['step'])
                         
     def train(self, wandbproj, wandbname): 
-        if dist.get_rank() == 0:
+        if True:#dist.get_rank() == 0:
             run = wandb.init(
                 # Set the wandb entity where your project will be logged (generally your team name).
                 entity="avasan",
@@ -244,7 +245,7 @@ class Train_pl_sedd:
 
         step = self.state['step']
         for ep in tqdm(range(self.cfg.training.epochs)):
-            self.train_sampler.set_epoch(ep)  # Ensures data is shuffled differently each epoch
+            #self.train_sampler.set_epoch(ep)  # Ensures data is shuffled differently each epoch
             train_iter = iter(self.train_ds)  # Reset iterator at start of epoch
             while True:
                 if step >= num_train_steps:
@@ -261,11 +262,12 @@ class Train_pl_sedd:
                 except StopIteration:
                     # End of dataset for this epoch
                     break
-
-                loss = train_step_fn(self.state, batch)#, esm_cond=esm_cond, mol_cond=mol_cond)
-                dist.all_reduce(loss, op=dist.ReduceOp.AVG)
+                
+                task = "ligand_given_protein"
+                loss = train_step_fn(self.state, batch_lig['input_ids'], prot_seq = batch_prot_seq, task = task)#, esm_cond=esm_cond, mol_cond=mol_cond)
+                #dist.all_reduce(loss, op=dist.ReduceOp.AVG)
                 step = self.state['step']
-                if dist.get_rank() == 0:
+                if True:#dist.get_rank() == 0:
                     # Logging and checkpointing
                     wandb.log({"training_loss": loss.item()})
                     if step % self.cfg.training.log_freq == 0:
@@ -274,7 +276,8 @@ class Train_pl_sedd:
                     if step % self.cfg.training.snapshot_freq_for_preemption == 0:
                         utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check.pth', self.state)
 
-                if step % self.cfg.training.eval_freq == 0:
+
+                if False:#step % self.cfg.training.eval_freq == 0:
                     eval_iter = iter(self.eval_ds)
                     try:
                         if self.cfg.data.valid != "text8":
@@ -299,13 +302,12 @@ class Train_pl_sedd:
 
 
 
-                if dist.get_rank() == 0 and ((step > 0 and step % self.cfg.training.snapshot_freq == 0) or step == num_train_steps):
+                if ((step > 0 and step % self.cfg.training.snapshot_freq == 0) or step == num_train_steps):
                     save_step = step // self.cfg.training.snapshot_freq
                     utils.save_checkpoint(os.path.join(self.checkpoint_dir, f'checkpoint_{save_step}.pth'), self.state)
 
 
-        if dist.get_rank() == 0:
-            wandb.finish()
+        wandb.finish()
 
 def run_train(
         work_dir,

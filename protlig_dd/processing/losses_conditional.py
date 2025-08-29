@@ -8,7 +8,7 @@ from protlig_dd.model import utils as mutils
 
 def get_loss_fn(noise, graph, train=True, sampling_eps=1e-3, lv=False):
 
-    def loss_fn(model, batch, cond=None, t=None, perturbed_batch=None, esm_cond=None, mol_cond=None):
+    def loss_fn(model, batch, perturbed_batch=None, t=None, prot_seq=None, lig_seq=None, task= "ligand_given_protein"):
         """
         Batch shape: [B, L] int. D given from graph
         """
@@ -28,7 +28,7 @@ def get_loss_fn(noise, graph, train=True, sampling_eps=1e-3, lv=False):
         print(f"{perturbed_batch=}")
         #print(f"{perturbed_batch=}")
         log_score_fn = mutils.get_score_fn(model, train=train, sampling=False)
-        log_score = log_score_fn(perturbed_batch, sigma)#, esm_cond, mol_cond) # * 100
+        log_score = log_score_fn(perturbed_batch, sigma, prot_seq=prot_seq, lig_seq=lig_seq, task=task)#, esm_cond, mol_cond) # * 100
         #print(f"{log_score=}")
         loss = graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)#/batch.shape[0]
         #print(loss)
@@ -90,7 +90,7 @@ def get_step_fn(noise, graph, train, optimize_fn, accum):
     accum_iter = 0
     total_loss = 0
 
-    def step_fn(state, batch, cond=None, esm_cond=None, mol_cond=None):
+    def step_fn(state, batch, prot_seq=None, lig_seq=None, task= "ligand_given_protein"):
         #nonlocal accum_iter 
         #nonlocal total_loss
         
@@ -101,7 +101,7 @@ def get_step_fn(noise, graph, train, optimize_fn, accum):
         if train:
             optimizer = state['optimizer']
             scaler = state['scaler']
-            loss = loss_fn(model, batch, cond=cond, esm_cond=esm_cond, mol_cond=mol_cond).mean() / accum
+            loss = loss_fn(model, batch, prot_seq=prot_seq, lig_seq=lig_seq, task= task).mean() / accum
             
             scaler.scale(loss).backward()
 
