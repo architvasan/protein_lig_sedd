@@ -3,6 +3,30 @@ import torch
 import os
 import logging
 from omegaconf import OmegaConf, open_dict
+import yaml
+from dataclasses import dataclass
+
+@dataclass
+class Config:
+    dictionary: dict | None = None
+    yamlfile: str | None = None
+
+    def __post_init__(self):
+        if self.dictionary is None and self.yamlfile is not None:
+            with open(self.yamlfile, "r") as f:
+                self.dictionary = yaml.safe_load(f)
+        
+        if self.dictionary is None:
+            # Handle case where both dictionary and yamlfile are None
+            self.dictionary = {}
+        
+        for key, value in self.dictionary.items():
+            if isinstance(value, dict):
+                value = Config(dictionary=value)
+            setattr(self, key, value)
+    
+    def __getitem__(self, key):
+        return getattr(self, key)
 
 
 def load_hydra_config_from_run(load_dir):
