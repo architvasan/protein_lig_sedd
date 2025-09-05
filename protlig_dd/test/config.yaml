@@ -1,0 +1,72 @@
+config params:
+model:
+  name: medium           
+  type: ddit
+  hidden_size: 1024
+  cond_dim: 1024
+  length: 1088
+  n_blocks: 8
+  n_heads: 8
+  scale_by_sigma: True
+  dropout: 0.1
+  esm_dim: 640
+  molformer_dim: 768         
+
+tokens: 2396
+
+training:
+  batch_size: 32
+  accum: 1
+  epochs: 100
+  max_samples: 10000
+  num_workers: 1
+  seed: 42
+  force_reprocess: False
+  n_iters: 1000000
+  snapshot_freq: 200
+  log_freq: 50
+  eval_freq: 200
+  snapshot_freq_for_preemption: 200
+  weight: standard
+  snapshot_sampling: True
+  ema: 0.9999
+
+data:
+  train: acyp
+  valid: acyp
+  cache_dir: data
+  train_ratio: 0.8
+  val_ratio: 0.8
+  max_protein_len: 1024
+  max_ligand_len: 128
+  use_structure: False
+
+graph:
+  type: absorb
+  file: data
+  report_all: False
+
+noise:
+  type: loglinear #geometric #
+  sigma_min: !!float "1e-5"
+  sigma_max: 20
+
+sampling:
+  predictor: euler
+  steps: 25
+  noise_removal: True
+
+eval:
+  batch_size: 25
+  perplexity: True
+  perplexity_batch_size: 4
+
+optim:
+  weight_decay: 0
+  optimizer: AdamW
+  lr: !!float "3e-5"
+  beta1: 0.9
+  beta2: 0.999
+  eps: !!float "1e-8"
+  warmup: 1_000
+  grad_clip: 1.
