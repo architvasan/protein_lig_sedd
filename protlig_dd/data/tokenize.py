@@ -13,6 +13,7 @@ class Tok_Mol:
         #Tokenize ligands & get embeddings
         mol_inputs = self.mol_tokenizer(smiles_list, padding='max_length', max_length=202, truncation=True, return_tensors="pt").to('cuda')
         return mol_inputs
+
 @dataclass
 class Tok_Prot :
     prot_model_id: str = "facebook/esm2_t30_150M_UR50D"
