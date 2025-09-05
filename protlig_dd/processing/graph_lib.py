@@ -8,11 +8,13 @@ from torch.cuda.amp import custom_fwd, custom_bwd
 
 from protlig_dd.utils.catsample import sample_categorical
 
-def get_graph(config, device):
+def get_graph(config, device, tokens=None):
+    if tokens is None:
+        tokens = config.tokens
     if config.graph.type == "uniform":
-        return Uniform(config.tokens)
+        return Uniform(tokens)
     elif config.graph.type == "absorb":
-        return Absorbing(config.tokens)
+        return Absorbing(tokens)
     else:
         raise ValueError(f"Graph {config.graph.type} not valid")
 
