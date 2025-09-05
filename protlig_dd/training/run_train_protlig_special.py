@@ -187,7 +187,7 @@ class Train_pl_sedd:
             self,
             ):
         # build token graph
-        self.graph = graph_lib.get_graph(self.cfg, self.device)
+        self.graph = graph_lib.get_graph(self.cfg, self.device, tokens=2363)
         
         # build score model
         self.score_model = ProteinLigandSharedDiffusion(self.cfg).to(self.device) #SEDD(self.cfg).to(self.device)

@@ -1,7 +1,7 @@
 # pip installs (if needed):
 # pip install torch torchvision torchaudio
 # pip install fair-esm transformers
-
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -109,7 +109,7 @@ class EmbeddingLayer(nn.Module):
         """
         super().__init__()
 
-        self.embedding = nn.Embedding(vocab_dim, dim)#vocab_dim + 1, dim)
+        self.embedding = nn.Embedding(vocab_dim+1, dim)#vocab_dim + 1, dim)
         # Optionally initialize manually
         #torch.nn.init.kaiming_uniform_(self.embedding.weight, a=math.sqrt(5))
 
@@ -306,7 +306,7 @@ class CrossAttentionBlock(nn.Module):
 
         # FFN
         x_res = x
-        x = self.norm3(x)
+        x = self.norm2(x)
         x = x_res + self.ff(x)
         return x
 
@@ -426,6 +426,8 @@ class SharedDiffusionTransformer(nn.Module):
         self.absorb = config.graph.type == "absorb"
         vocab_size = tokens + (1 if self.absorb else 0) #config.
         #print(f"{vocab_size=}")
+        print(f"{config.model.hidden_size=}")
+        print(f"{vocab_size=}")
         self.vocab_embed = EmbeddingLayer(config.model.hidden_size, vocab_size)
         self.sigma_map = TimestepEmbedder(config.model.cond_dim)
         self.rotary_emb = rotary.Rotary(config.model.hidden_size // config.model.n_heads)
@@ -454,6 +456,7 @@ class SharedDiffusionTransformer(nn.Module):
         #print(indices.size)
         #print("ESM cond")
         #print(esm_cond.size())
+        print(f"{indices.size()=}")
         x = self.vocab_embed(indices)
         #print("vocab embedded")
         print(f"{x.size()=}")
@@ -462,9 +465,9 @@ class SharedDiffusionTransformer(nn.Module):
         #print(c.size())
         rotary_cos_sin = self.rotary_emb(x)
 
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        with torch.cuda.amp.autocast(dtype=torch.float32):
             for i in range(len(self.blocks)):
-                x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None, cond=cond_seq, cond_mask=cond_mask)
+                x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None, cond=cond_seq)#, cond_mask=cond_mask)
 
             x = self.output_layer(x, c)
 
@@ -531,9 +534,9 @@ class ProteinLigandSharedDiffusion(nn.Module):
         # Two diffusion heads (one for each vocabulary) sharing the same backbone weights?
         # Option A: single backbone, separate output heads
         self.shared_backbone = nn.ModuleDict({
-            "ligand": SharedDiffusionTransformer(config, tokens = 2363),#vocab_size=vocab_lig, d_model=d_latent,
+            "ligand": SharedDiffusionTransformer(config, tokens = 2364),#vocab_size=vocab_lig, d_model=d_latent,
                                                  #n_layers=n_layers, n_heads=n_heads, d_ff=d_ff),
-            "protein": SharedDiffusionTransformer(config, tokens = 33)#vocab_size=vocab_prot, d_model=d_latent,
+            "protein": SharedDiffusionTransformer(config, tokens = 36)#vocab_size=vocab_prot, d_model=d_latent,
                                                   #n_layers=n_layers, n_heads=n_heads, d_ff=d_ff)
         })
 
@@ -594,7 +597,7 @@ class ProteinLigandSharedDiffusion(nn.Module):
         if task == "ligand_given_protein":
             cond_seq, cond_mask = self.fuse_condition(p_seq_lat, None, p_mask, None, mode="concat")
             logits = self.shared_backbone["ligand"](
-                token_ids=noisy_tokens, timesteps=timesteps,
+                noisy_tokens, timesteps,
                 cond_seq=cond_seq, src_mask=src_mask, cond_mask=cond_mask
             )
             return logits
@@ -602,7 +605,7 @@ class ProteinLigandSharedDiffusion(nn.Module):
         elif task == "protein_given_ligand":
             cond_seq, cond_mask = self.fuse_condition(None, l_seq_lat, None, l_mask, mode="concat")
             logits = self.shared_backbone["protein"](
-                token_ids=noisy_tokens, timesteps=timesteps,
+                noisy_tokens, timesteps,
                 cond_seq=cond_seq, src_mask=src_mask, cond_mask=cond_mask
             )
             return logits
@@ -611,7 +614,7 @@ class ProteinLigandSharedDiffusion(nn.Module):
             # Condition ligand on BOTH protein + ligand context (e.g., masked tokens or teacher forcing)
             cond_seq, cond_mask = self.fuse_condition(p_seq_lat, l_seq_lat, p_mask, l_mask, mode="concat")
             logits = self.shared_backbone["ligand"](
-                token_ids=noisy_tokens, timesteps=timesteps,
+                noisy_tokens, timesteps,
                 cond_seq=cond_seq, src_mask=src_mask, cond_mask=cond_mask
             )
             return logits
@@ -619,7 +622,7 @@ class ProteinLigandSharedDiffusion(nn.Module):
         elif task == "joint_protein":
             cond_seq, cond_mask = self.fuse_condition(p_seq_lat, l_seq_lat, p_mask, l_mask, mode="concat")
             logits = self.shared_backbone["protein"](
-                token_ids=noisy_tokens, timesteps=timesteps,
+                noisy_tokens, timesteps,
                 cond_seq=cond_seq, src_mask=src_mask, cond_mask=cond_mask
             )
             return logits
