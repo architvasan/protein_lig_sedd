@@ -20,8 +20,8 @@
 # --- Project and Environment Directories ---
 # WORK_DIR should be the absolute path to the root of your project directory.
 # ENV_DIR should be the path to your Conda environment.
-WORK_DIR="/nfs/ml_lab/homes/xlian/protein_lig_sedd/protlig_dd/test"
-ENV_DIR="$WORK_DIR/prot_lig_sedd" # Or your new environment name, e.g., protlig_dd_new
+WORK_DIR="/nfs/ml_lab/projects/ml_lab/xlian/protein_lig_sedd/protlig_dd/test"
+ENV_DIR="/homes/xlian/.conda/envs/protlig_dd" # Or your new environment name, e.g., protlig_dd_new
 
 # --- Configuration File ---
 # Path to the YAML configuration file for the model and training parameters.
@@ -66,17 +66,11 @@ echo "Work Directory: $WORK_DIR"
 echo "Conda Environment: $ENV_DIR"
 echo "================================================="
 
-# Load the Conda module if required by your HPC system.
-# This might need to be adjusted based on your system's module manager.
-module use /soft/modulefiles
-module load conda
-
 # Navigate to the working directory.
 cd "$WORK_DIR" || { echo "Error: Could not navigate to WORK_DIR. Exiting."; exit 1; }
 
 # Activate the Conda environment.
-source activate "$ENV_DIR" || { echo "Error: Could not activate Conda environment. Exiting."; exit 1; }
-
+conda activate "$ENV_DIR" 
 
 ################################################################################
 ### 3. RUNNING THE TRAINING SCRIPT
@@ -106,16 +100,5 @@ python -m protlig_dd.training.run_train_protlig_special \
     -pe "$PROT_EMB_ID" \
     -di "$DEVICE_ID" \
     --seed "$SEED" \
-    > "logs/run_${WANDB_NAME}.log" \
-    2> "logs/run_${WANDB_NAME}.err"
-
-# Optional: Add a small sleep to ensure all logs are written before the script exits.
-sleep 5
-
-echo "================================================="
-echo "Training script has finished."
-echo "Check logs/run_${WANDB_NAME}.log for output and logs/run_${WANDB_NAME}.err for errors."
-echo "================================================="
-
-# Deactivate the environment (good practice).
-conda deactivate
+#    > "logs/run_${WANDB_NAME}.log" \
+#    2> "logs/run_${WANDB_NAME}.err"

@@ -10,7 +10,8 @@ model:
   scale_by_sigma: True
   dropout: 0.1
   esm_dim: 640
-  molformer_dim: 768         
+  molformer_dim: 768
+  device: cuda
 
 tokens: 2396
 
