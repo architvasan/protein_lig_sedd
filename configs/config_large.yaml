@@ -6,7 +6,7 @@ model:
   hidden_size: 1024 #768
   cond_dim: 128 #512 #28
   length: 1224 #36 #128
-  n_blocks: 8
+  n_blocks: 16
   n_heads: 16
   scale_by_sigma: True
   dropout: 0.1
@@ -21,7 +21,7 @@ ngpus: 1
 tokens: 2396 #39 #25
 
 training:
-  batch_size: 8
+  batch_size: 4
   accum: 1
   epochs: 10
   max_samples: 1000000
@@ -30,8 +30,8 @@ training:
   force_reprocess: False
   n_iters: 10000000 #10_000
   snapshot_freq: 200 #1_000
-  log_freq: 50
-  eval_freq: 200
+  log_freq: 500
+  eval_freq: 500
   snapshot_freq_for_preemption: 200
   weight: standard
   snapshot_sampling: True
@@ -70,7 +70,7 @@ eval:
 optim:
   weight_decay: 0
   optimizer: AdamW
-  lr: !!float "3e-5"
+  lr: !!float "5e-4"
   beta1: 0.9
   beta2: 0.999
   eps: !!float "1e-8"

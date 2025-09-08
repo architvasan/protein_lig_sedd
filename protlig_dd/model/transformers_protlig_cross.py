@@ -475,7 +475,7 @@ class DualTrackDiffusionTransformer(nn.Module):
         
         # Scale by sigma if needed
         if self.scale_by_sigma and self.absorb:
-            esigm1_log = torch.where(sigma < 0.5, torch.expm1(sigma), sigma.exp() - 1).log().to(x.dtype)[:, None, None]
+            esigm1_log = torch.where(sigma < 0.5, torch.expm1(sigma), sigma.exp() - 1).log().to(protein_logits.dtype)[:, None, None]
             protein_logits = protein_logits - esigm1_log - np.log(protein_logits.shape[-1] - 1)
             ligand_logits = ligand_logits - esigm1_log - np.log(ligand_logits.shape[-1] - 1)
         

@@ -25,6 +25,7 @@ from transformers import GPT2TokenizerFast, GPT2LMHeadModel
 #from smallmolec_campaign.utils.smiles_pair_encoders_functions import *
 from protlig_dd.data.process_full_plinder import create_improved_data_loaders#ddp_data_loaders
 from protlig_dd.data.tokenize import Tok_Mol, Tok_Prot
+from protlig_dd.utils.lr_scheduler import WarmupCosineLR
 from dataclasses import dataclass
 import yaml
 import inspect
@@ -130,12 +131,12 @@ class Train_pl_sedd:
     datafile: str
     cfg_fil: str | None = None # either yaml file or dict
     cfg_dict: object | None = None
-    #mol_emb_id: str = "ibm/MoLFormer-XL-both-10pct"
-    #prot_emb_id: str = "facebook/esm2_t30_150M_UR50D"
     dev_id: str = 'cuda:0'
     seed: int = 42
     sampling_eps: float = 1e-3
     use_pretrained_conditioning: bool = False
+    mol_emb_id: str = "ibm/MoLFormer-XL-both-10pct" # "seyonec/PubChem10M_SMILES_BPE_450k" # "ibm/MoLFormer-XL-both-10pct"
+    prot_emb_id: str = "facebook/esm2_t30_150M_UR50D" # "Rostlab/prot_bert" # "facebook/esm2_t30_150M_UR50D"
     def __post_init__(self):
         """
         Load config file/dictionary
@@ -223,28 +224,28 @@ class Train_pl_sedd:
         self.state['scaler'].step(self.state['optimizer'])
         self.state['scaler'].update()
 
-    def calc_loss(self, model, batch, task, t = None):
-        batch = batch.to(self.device)
+    def calc_loss(self, batch, task, t = None):
+        #batch = batch.to(self.device)
         if t is None:
-            t = (1 - self.sampling_eps) * torch.rand(batch.shape[0], device=self.device) + self.sampling_eps
+            t = (1 - self.sampling_eps) * torch.rand(batch['prot_tokens'].shape[0], device=self.device) + self.sampling_eps
         
         sigma, dsigma = self.noise(t)
         if task == "protein_only":
-            protein_indices = self.graph_prot.sample_transition(batch['prot_tokens'], sigma[:, None])
-            log_score = model(protein_indices=protein_indices, timesteps = sigma, mode=task)
+            protein_indices = self.graph_prot.sample_transition(batch['prot_tokens'].to(self.device), sigma[:, None])
+            log_score = self.score_model(protein_indices=protein_indices, timesteps = sigma, mode=task)
         elif task == "ligand_only":
-            ligand_indices = self.graph_lig.sample_transition(batch['lig_tokens'], sigma[:, None])
-            log_score = model(ligand_indices=ligand_indices, timesteps = sigma, mode=task)
+            ligand_indices = self.graph_lig.sample_transition(batch['lig_tokens'].to(self.device), sigma[:, None])
+            log_score = self.score_model(ligand_indices=ligand_indices, timesteps = sigma, mode=task)
         elif task == "joint":
-            protein_indices = self.graph_prot.sample_transition(batch['prot_tokens'], sigma[:, None])
-            ligand_indices = self.graph_lig.sample_transition(batch['lig_tokens'], sigma[:, None])
-            log_score = model(protein_indices=protein_indices, ligand_indices=ligand_indices, timesteps = sigma, mode=task)
+            protein_indices = self.graph_prot.sample_transition(batch['prot_tokens'].to(self.device), sigma[:, None])
+            ligand_indices = self.graph_lig.sample_transition(batch['lig_tokens'].to(self.device), sigma[:, None])
+            log_score = self.score_model(protein_indices=protein_indices, ligand_indices=ligand_indices, timesteps = sigma, mode=task)
         elif task == "ligand_given_protein":
-            ligand_indices = self.graph.sample_transition(batch['lig_tokens'], sigma[:, None])
-            log_score = model(ligand_indices=ligand_indices, protein_seq_str = batch['protein_seq'], timesteps = sigma, mode=task, use_pretrained_conditioning=self.use_pretrained_conditioning)
+            ligand_indices = self.graph.sample_transition(batch['lig_tokens'].to(self.device), sigma[:, None])
+            log_score = self.score_model(ligand_indices=ligand_indices, protein_seq_str = batch['protein_seq'], timesteps = sigma, mode=task, use_pretrained_conditioning=self.use_pretrained_conditioning)
         elif task == "protein_given_ligand":
-            protein_indices = self.graph.sample_transition(batch['prot_tokens'], sigma[:, None])
-            log_score = model(protein_indices=protein_indices, ligand_smiles_str=batch['ligand_smiles'], timesteps = sigma, mode=task, use_pretrained_conditioning=self.use_pretrained_conditioning)
+            protein_indices = self.graph.sample_transition(batch['prot_tokens'].to(self.device), sigma[:, None])
+            log_score = self.score_model(protein_indices=protein_indices, ligand_smiles_str=batch['ligand_smiles'], timesteps = sigma, mode=task, use_pretrained_conditioning=self.use_pretrained_conditioning)
 
         else:
             raise NotImplementedError(f"Task {task} not implemented")
@@ -254,29 +255,32 @@ class Train_pl_sedd:
         elif task in ['ligand_only', 'ligand_given_protein']:
             loss = self.graph_lig.score_entropy(log_score, sigma[:, None], ligand_indices, batch['lig_tokens'])
         elif task == 'joint':
-            loss_prot = self.graph_prot.score_entropy(log_score[0], sigma[:, None], protein_indices, batch['prot_tokens'])
-            loss_lig = self.graph_lig.score_entropy(log_score[1], sigma[:, None], ligand_indices, batch['lig_tokens'])
+            loss_prot = self.graph_prot.score_entropy(log_score[0], sigma[:, None], protein_indices, batch['prot_tokens']).mean()
+            loss_lig = self.graph_lig.score_entropy(log_score[1], sigma[:, None], ligand_indices, batch['lig_tokens']).mean()
             loss = (loss_prot + loss_lig)/2
         else:
             raise NotImplementedError(f"Task {task} not implemented")
 
-        loss = (dsigma[:, None] * loss).mean()
+        loss = (dsigma[:, None] * loss)#.mean()
         return loss
 
-    def train_step(self, batch, model, task, cond=None, mol_cond=None):
-        optimizer = self.state['optimizer']
+    def train_step(self, batch, task):
         scaler = self.state['scaler']
 
-        loss = self.calc_loss(model, batch, task).mean()
+        loss = self.calc_loss(batch, task).mean()
         if task == "all":
             task = np.random.choice(["ligand_given_protein", "protein_given_ligand", "joint"])
-            loss = self.calc_loss(model, batch, task).mean()
+            print(f"Training task: {task}")
+            loss = self.calc_loss(batch, task)#.mean()
         scaler.scale(loss).backward()
        
         self.state['step'] += 1
-        self.optimize_fn(optimizer, scaler, model.parameters(), step=self.state['step'])
-        self.state['ema'].update(model.parameters())
-        optimizer.zero_grad()
+        self.optimize_fn(self.state['optimizer'], self.score_model.parameters())
+        self.state['ema'].update(self.score_model.parameters())
+        self.state['optimizer'].step()
+        self.state['optimizer'].zero_grad()
+        self.state['model'] = self.score_model
+        self.scheduler.step()
         return loss 
 
     def eval_step(self, batch, model, task, cond=None):
@@ -285,7 +289,7 @@ class Train_pl_sedd:
             ema.store(model.parameters())
             ema.copy_to(model.parameters())
 
-            loss = self.calc_loss(model, batch, cond=cond).mean()
+            loss = self.calc_loss(batch, task)#.mean()
             ema.restore(model.parameters())
         return loss
 
@@ -308,78 +312,103 @@ class Train_pl_sedd:
         self.setup_loaders()
         self.load_model()
         self.optim_state()
+        self.scheduler = WarmupCosineLR(
+                            self.state['optimizer'],
+                            warmup_steps=self.cfg.optim.warmup,
+                            max_steps=self.cfg.training.n_iters,
+                            base_lr=self.cfg.optim.lr/10,
+                            max_lr=self.cfg.optim.lr)
 
-
-        if self.cfg.training.snapshot_sampling:
-            sampling_shape = (self.cfg.training.batch_size // (self.cfg.ngpus * self.cfg.training.accum), self.cfg.model.length)
-            self.sampling_fn = sampling.get_sampling_fn(self.cfg, self.graph, self.noise, sampling_shape, self.sampling_eps, self.device)
+        #if self.cfg.training.snapshot_sampling:
+        #    sampling_shape = (self.cfg.training.batch_size // (self.cfg.ngpus * self.cfg.training.accum), self.cfg.model.length)
+        #    self.sampling_fn = sampling.get_sampling_fn(self.cfg, self.graph, self.noise, sampling_shape, self.sampling_eps, self.device)
 
         num_train_steps = self.cfg.training.n_iters
         print(f"Starting training loop at step {self.initial_step}.")
         print(f"Training for {self.cfg.training.epochs} epochs or {num_train_steps} steps.")
 
         step = self.state['step']
+        eval_loss_list = []
         for ep in tqdm(range(self.cfg.training.epochs)):
             #self.train_sampler.set_epoch(ep)  # Ensures data is shuffled differently each epoch
             train_iter = iter(self.train_ds)  # Reset iterator at start of epoch
+            eval_iter = iter(self.eval_ds)
+
+            """
+            Training loop
+            1. Get train batch
+            2. Tokenize train batch
+            3. Get embeddings for train batch
+            4. Train step
+            5. Log train loss
+            """
+            
             while True:
                 if step >= num_train_steps:
                     print(f"Reached max training steps: {num_train_steps}. Ending training.")
                     return  # Exit training early
 
                 try:
-                    batch_tot = next(train_iter)
-                    batch_lig_seq = batch_tot['ligand_smiles']
-                    batch_prot_seq = batch_tot['protein_seq']
-                    batch_lig = self.tokenizer_mol.tokenize(batch_lig_seq)
-                    batch_prot = self.tokenizer_prot.tokenize(batch_prot_seq)
-
+                    batch = next(train_iter)
+                    batch['lig_tokens'] = self.tokenizer_mol.tokenize(batch['ligand_smiles'])['input_ids']
+                    batch ['prot_tokens'] = self.tokenizer_prot.tokenize(batch['protein_seq'])['input_ids']
+                    print(f"Batch ligand smiles: {batch['ligand_smiles']}, protein seq: {batch['protein_seq']}")
+                    print(f"Batch ligand tokens: {batch['lig_tokens']}, protein tokens: {batch['prot_tokens']}")
+                    #print(f"Batch ligand tokens shape: {batch['lig_tokens'].shape}, protein tokens shape: {batch['prot_tokens'].shape}")
                 except StopIteration:
                     # End of dataset for this epoch
                     break
                 
-                task = "ligand_given_protein"
-                loss = train_step_fn(self.state, batch_lig['input_ids'], prot_seq = batch_prot_seq, task = task)#, esm_cond=esm_cond, mol_cond=mol_cond)
-                #dist.all_reduce(loss, op=dist.ReduceOp.AVG)
-                step = self.state['step']
-                if True:#dist.get_rank() == 0:
-                    # Logging and checkpointing
-                    wandb.log({"training_loss": loss.item()})
-                    if step % self.cfg.training.log_freq == 0:
-                        print(f"epoch: {ep}, step: {step}, training_loss: {loss.item():.5e}")
-
-                    if step % self.cfg.training.snapshot_freq_for_preemption == 0:
-                        utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check.pth', self.state)
-
-
-                if False:#step % self.cfg.training.eval_freq == 0:
-                    eval_iter = iter(self.eval_ds)
+                loss = self.train_step(batch, self.task)#, esm_cond=esm_cond, mol_cond=mol_cond)
+                #step = self.state['step']
+                # Logging and checkpointing
+                wandb.log({"training_loss": loss.item()})
+                if step % self.cfg.training.log_freq == 0:
+                    print(f"epoch: {ep}, step: {step}, training_loss: {loss.item():.5e}")
+                if step % self.cfg.training.eval_freq == 0 and step > 0:
                     try:
-                        if self.cfg.data.valid != "text8":
-                            eval_batch_lig_seq = batch_tot['ligand_smiles']
-                            eval_batch_prot_seq = batch_tot['protein_seq']
-                            eval_batch_lig, eval_batch_prot, eval_mol_cond, eval_esm_cond = self.embedding_mol_prot.process_embeddings(
-                                eval_batch_prot_seq,
-                                eval_batch_lig_seq)
-                            eval_batch_lig = eval_batch_lig.to(self.device)
-                            eval_batch_prot = eval_batch_prot.to(self.device)
-                            eval_batch = torch.concat([eval_batch_lig['input_ids'], eval_batch_prot['input_ids']+2363], axis=1)
-                        else:
-                            eval_batch = next(eval_iter).to(self.device)
-                    except StopIteration:
-                        # Handle empty eval set or re-init if needed
-                        eval_batch = None
+                        batch_eval = next(eval_iter)
+                        batch_eval['lig_tokens'] = self.tokenizer_mol.tokenize(batch_eval['ligand_smiles'])['input_ids']
+                        batch_eval['prot_tokens'] = self.tokenizer_prot.tokenize(batch_eval['protein_seq'])['input_ids']
+                        eval_loss = self.eval_step(batch_eval, self.state['model'], self.task)#, esm_cond=esm_cond, mol_cond=mol_cond)
 
-                    if eval_batch is not None:
-                        eval_loss = eval_step_fn(self.state, eval_batch, esm_cond=esm_cond, mol_cond=mol_cond)
                         print(f"epoch: {ep}, step: {step}, evaluation_loss: {eval_loss.item():.5e}")
-                        wandb.log({"evaluation_loss": eval_loss.item()})
+                        wandb.log({"eval_loss": eval_loss.item()})
+                        eval_loss_list.append(eval_loss.item())
+                        if eval_loss.item() <= min(eval_loss_list):
+                            utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check_{wandbproj}_{wandbname}.pth', self.state)
 
+                    except StopIteration:
+                        break
+                    
+                        # End of eval dataset for this epoch
+                """
+                Evaluation step
+                1. Get eval batch
+                2. Tokenize eval batch
+                3. Get embeddings for eval batch
+                4. Eval step
+                5. Log eval loss
+                6. Save checkpoint if needed
+                """
 
-
-                if ((step > 0 and step % self.cfg.training.snapshot_freq == 0) or step == num_train_steps):
-                    save_step = step // self.cfg.training.snapshot_freq
-                    utils.save_checkpoint(os.path.join(self.checkpoint_dir, f'checkpoint_{save_step}.pth'), self.state)
+            while True:
+                eval_it = 0
+                if eval_it < 100000000:
+                    try:
+                        batch_eval = next(eval_iter)
+                        batch_eval['lig_tokens'] = self.tokenizer_mol.tokenize(batch_eval['ligand_smiles'])['input_ids']
+                        batch_eval['prot_tokens'] = self.tokenizer_prot.tokenize(batch_eval['protein_seq'])['input_ids']
+                        eval_loss = self.eval_step(batch_eval, self.state['model'], self.task)#, esm_cond=esm_cond, mol_cond=mol_cond)
+                        print(f"epoch: {ep}, step: {step}, evaluation_loss: {eval_loss.item():.5e}")
+                    except StopIteration:
+                        # End of eval dataset for this epoch
+                        break
+                
+                wandb.log({"eval_loss": eval_loss.item()})
+                eval_loss_list.append(eval_loss.item())
+                if eval_loss.item() <= min(eval_loss_list):
+                    utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check.pth', self.state)
 
 
         wandb.finish()
@@ -396,13 +425,12 @@ def run_train(
         dev_id = "cuda:0",
         seed=42):
         #epochs=10, max_samples=1000000, batch_size=32, num_workers=1, train_ratio=0.8, val_ratio=0.1, max_protein_len=1024, max_ligand_len=128, use_structure=False, seed=42, force_reprocess=False):
+
     trainer_object= Train_pl_sedd(
                         work_dir = work_dir,
                         cfg_fil = cfg_fil,
                         cfg_dict = cfg_dict,
                         datafile = datafile,
-                        mol_emb_id = mol_emb_id,
-                        prot_emb_id = prot_emb_id,
                         dev_id = dev_id,
                         seed = seed)
 

@@ -9,44 +9,55 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler
+from transformers import AutoModel, AutoTokenizer
 from tqdm import tqdm
-
+from dataclasses import dataclass
 # Evaluation imports for protein designability and ligand drug-likeness
-try:
-    from tape import ProteinBertModel, TAPETokenizer
-    TAPE_AVAILABLE = True
-except ImportError:
-    TAPE_AVAILABLE = False
-    print("Warning: TAPE not available for protein evaluation")
 
-
+@dataclass
 class ProteinEvaluator:
     """Evaluate protein designability using various metrics"""
+    prot_model_id: str = "facebook/esm2_t30_150M_UR50D"
+    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    protein_sequences: list = None
+    def __post_init__(self):
+            self.protein_model = AutoModel.from_pretrained(self.prot_model_id).to('cuda')
+            self.protein_tokenizer = AutoTokenizer.from_pretrained(self.prot_model_id, padding='max_length', max_length=1022)#,  # Pad to 512 tokens)
     
-    def __init__(self, device='cuda'):
-        self.device = device
-        if TAPE_AVAILABLE:
-            self.tape_model = ProteinBertModel.from_pretrained('bert-base')
-            self.tape_tokenizer = TAPETokenizer(vocab='iupac')
-            self.tape_model.to(device)
-            self.tape_model.eval()
-    
-    def calculate_designability_score(self, protein_sequences):
+    def calculate_designability_score(self):
         """Calculate protein designability using structural and sequence-based metrics"""
         scores = {}
         
         # Basic sequence metrics
-        scores['length'] = [len(seq) for seq in protein_sequences]
-        scores['hydrophobicity'] = [self._calculate_hydrophobicity(seq) for seq in protein_sequences]
-        scores['charge'] = [self._calculate_charge(seq) for seq in protein_sequences]
-        scores['instability_index'] = [self._calculate_instability(seq) for seq in protein_sequences]
+        scores['length'] = [len(seq) for seq in self.protein_sequences]
+        scores['hydrophobicity'] = [self._calculate_hydrophobicity(seq) for seq in self.protein_sequences]
+        scores['charge'] = [self._calculate_charge(seq) for seq in self.protein_sequences]
+        scores['instability_index'] = [self._calculate_instability(seq) for seq in self.protein_sequences]
         
         # Secondary structure prediction confidence (if TAPE available)
-        if TAPE_AVAILABLE:
-            scores['bert_confidence'] = self._calculate_bert_confidence(protein_sequences)
+        scores['esm_confidence'] = self._calculate_bert_confidence(self.protein_sequences)
         
         return scores
-    
+    def calculate_similarity(self, reference_sequences):
+        """Calculate sequence similarity to reference set using simple identity metric"""
+        from Bio import pairwise2
+        from Bio.Seq import Seq
+        from Bio.Align import substitution_matrices
+        
+        matrix = substitution_matrices.load("BLOSUM62")
+        scores = []
+        
+        for seq in self.protein_sequences:
+            max_score = 0
+            for ref_seq in reference_sequences:
+                alignments = pairwise2.align.globaldx(seq, ref_seq, matrix)
+                if alignments:
+                    score = alignments[0][2]  # Get the score of the best alignment
+                    if score > max_score:
+                        max_score = score
+            scores.append(max_score / max(len(seq), len(ref_seq)))  # Normalize by length
+        
+        return scores
     def _calculate_hydrophobicity(self, sequence):
         """Calculate Kyte-Doolittle hydrophobicity scale"""
         hydrophobicity_scale = {
@@ -77,14 +88,13 @@ class ProteinEvaluator:
         confidences = []
         with torch.no_grad():
             for seq in sequences:
-                if len(seq) > 1000:  # Skip very long sequences
+                if len(seq) > 1024:  # Skip very long sequences
                     confidences.append(0.0)
                     continue
                     
-                tokens = self.tape_tokenizer(seq)['input_ids']
-                tokens = torch.tensor(tokens).unsqueeze(0).to(self.device)
+                tokens = self.protein_tokenizer(sequences, padding='max_length', max_length=1022, truncation=True, return_tensors="pt").to('cuda')
                 
-                outputs = self.tape_model(tokens)
+                outputs = self.protein_model(**tokens)
                 # Use negative loss as confidence metric
                 logits = outputs[0]
                 probs = F.softmax(logits, dim=-1)
@@ -93,7 +103,7 @@ class ProteinEvaluator:
         
         return confidences
 
-
+@dataclass
 class LigandEvaluator:
     """Evaluate ligand drug-likeness and synthetic accessibility"""
     
