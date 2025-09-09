@@ -30,7 +30,7 @@ from dataclasses import dataclass
 import yaml
 import inspect
 import protlig_dd.data.get_embeddings as get_embeddings
-
+import protlig_dd.sampling.sampling as sampling_dd
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 @dataclass
@@ -303,29 +303,44 @@ class Train_pl_sedd:
 
         return loss 
 
-    def generate(self, batch):
-        self.ema.copy_to(self.score_model.parameters())
-        with torch.no_grad():
-            esm_cond = None
-            mol_cond = None
-            if 'protein_seq' in batch:
-                esm_cond = batch['protein_seq']
-            if 'ligand_smiles' in batch:
-                mol_cond = batch['ligand_smiles']
-            sampling_shape = (batch['prot_tokens'].shape[0], self.cfg.model.length)
-            sampling_fn = sampling.get_sampling_fn(self.cfg, self.graph, self.noise, sampling_shape, self.sampling_eps, self.device)
-            samples = sampling_fn(self.score_model, esm_cond=esm_cond, mol_cond=mol_cond)
-        return samples
 
     def eval_step(self, batch, model, task, cond=None):
         with torch.no_grad():
             ema = self.state['ema']
-            ema.store(model.parameters())
-            ema.copy_to(model.parameters())
+            ema.store(self.score_model.parameters())
+            ema.copy_to(self.score_model.parameters())
 
             loss = self.calc_loss(batch, task)#.mean()
-            ema.restore(model.parameters())
+            ema.restore(self.score_model.parameters())
         return loss
+
+    def setupsampler(self, datatype, sampling_shape): #sampling_shape = (batch['prot_tokens'].shape[0], self.cfg.model.length)
+        ema = self.state['ema']
+        ema.store(self.score_model.parameters())
+        ema.copy_to(self.score_model.parameters())
+
+        ema.restore(self.score_model.parameters())
+        with torch.no_grad():
+            if datatype == 'protein':
+                graph_sampler = self.graph_prot
+            elif datatype == 'ligand':
+                graph_sampler = self.graph_lig
+
+            sampling_fn = sampling_dd.get_sampling_fn(
+                               self.cfg,
+                               graph_sampler,
+                               self.noise,
+                               sampling_shape,
+                               self.sampling_eps,
+                               self.device)
+
+        return sampling_fn
+
+    def generation(self, sampling_fn, model, tokenizer, task, prot_seq = None, lig_seq = None):
+        samples = sampling_fn(model, task, prot_seq = prot_seq, lig_seq = lig_seq)
+        
+        real_samples = tokenizer.batch_decode(samples)
+        return real_samples
 
     def train(self, wandbproj, wandbname): 
         if True:#dist.get_rank() == 0:
@@ -352,6 +367,9 @@ class Train_pl_sedd:
                             max_steps=self.cfg.training.n_iters,
                             base_lr=self.cfg.optim.lr/10,
                             max_lr=self.cfg.optim.lr)
+
+        self.sampler_prot = self.setupsampler('protein', (self.cfg.training.batch_size, self.cfg.data.max_protein_len))
+        self.sampler_lig = self.setupsampler('ligand', (self.cfg.training.batch_size, self.cfg.data.max_ligand_len))
 
         #if self.cfg.training.snapshot_sampling:
         #    sampling_shape = (self.cfg.training.batch_size // (self.cfg.ngpus * self.cfg.training.accum), self.cfg.model.length)
@@ -399,7 +417,7 @@ class Train_pl_sedd:
                     loss, loss_prot, loss_lig = self.train_step(batch, self.task)
                 else:
                     loss = self.train_step(batch, self.task)#, esm_cond=esm_cond, mol_cond=mol_cond)
-                #step = self.state['step']
+                step = self.state['step']
                 # Logging and checkpointing
                 wandb.log({"training_loss": loss.item()})
                 if self.task == "joint":
@@ -419,6 +437,32 @@ class Train_pl_sedd:
                         eval_loss_list.append(eval_loss.item())
                         if eval_loss.item() <= min(eval_loss_list):
                             utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check_{wandbproj}_{wandbname}.pth', self.state)
+                        
+                        if task in ['protein_given_ligand', 'joint']:
+                            protein_gen_given_lig = self.generation(self,
+                                                        self.sampler_prot,
+                                                        self.score_model,
+                                                        self.tokenizer_prot,
+                                                        task='protein_given_ligand',
+                                                        prot_seq = None,
+                                                        lig_seq = batch_eval['ligand_smiles'])
+                        
+                            print("Generated Proteins given ligands!!!!!")
+                            for pgen in protein_gen_given_lig:
+                                print(pgen)
+
+                        if task in ['ligand_given_protein', 'joint']:
+                            ligand_gen_given_prot = self.generation(self,
+                                                        self.sampler_lig,
+                                                        self.score_model,
+                                                        self.tokenizer_mol,
+                                                        task='ligand_given_protein',
+                                                        prot_seq = None,
+                                                        lig_seq = batch_eval['ligand_smiles'])
+
+                            print("Generated Ligands given proteins!!!!!!")
+                            for lgen in ligand_gen_given_prot:
+                                print(lgen)
 
                     except StopIteration:
                         break
