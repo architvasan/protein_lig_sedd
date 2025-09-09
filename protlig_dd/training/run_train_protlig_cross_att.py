@@ -195,6 +195,7 @@ class Train_pl_sedd:
         self.graph_lig = graph_lib.get_graph(self.cfg, self.device, tokens=2364)
         # build score model
         self.score_model = ProteinLigandDiffusionModel(self.cfg).to(self.device) #SEDD(self.cfg).to(self.device)
+        self.score_model.train()
         #self.score_model = DDP(self.score_model, device_ids = [self.local_rank], output_device = self.local_rank)
         self.ema = ExponentialMovingAverage(
             self.score_model.parameters(), decay=self.cfg.training.ema)
@@ -230,22 +231,23 @@ class Train_pl_sedd:
             t = (1 - self.sampling_eps) * torch.rand(batch['prot_tokens'].shape[0], device=self.device) + self.sampling_eps
         
         sigma, dsigma = self.noise(t)
+        sigma_reshaped = sigma.reshape(-1)
         if task == "protein_only":
             protein_indices = self.graph_prot.sample_transition(batch['prot_tokens'].to(self.device), sigma[:, None])
-            log_score = self.score_model(protein_indices=protein_indices, timesteps = sigma, mode=task)
+            log_score = self.score_model(protein_indices=protein_indices, timesteps = sigma_reshaped, mode=task)
         elif task == "ligand_only":
             ligand_indices = self.graph_lig.sample_transition(batch['lig_tokens'].to(self.device), sigma[:, None])
-            log_score = self.score_model(ligand_indices=ligand_indices, timesteps = sigma, mode=task)
+            log_score = self.score_model(ligand_indices=ligand_indices, timesteps = sigma_reshaped, mode=task)
         elif task == "joint":
             protein_indices = self.graph_prot.sample_transition(batch['prot_tokens'].to(self.device), sigma[:, None])
             ligand_indices = self.graph_lig.sample_transition(batch['lig_tokens'].to(self.device), sigma[:, None])
-            log_score = self.score_model(protein_indices=protein_indices, ligand_indices=ligand_indices, timesteps = sigma, mode=task)
+            log_score = self.score_model(protein_indices=protein_indices, ligand_indices=ligand_indices, timesteps = sigma_reshaped, mode=task)
         elif task == "ligand_given_protein":
             ligand_indices = self.graph.sample_transition(batch['lig_tokens'].to(self.device), sigma[:, None])
-            log_score = self.score_model(ligand_indices=ligand_indices, protein_seq_str = batch['protein_seq'], timesteps = sigma, mode=task, use_pretrained_conditioning=self.use_pretrained_conditioning)
+            log_score = self.score_model(ligand_indices=ligand_indices, protein_seq_str = batch['protein_seq'], timesteps = sigma_reshaped, mode=task, use_pretrained_conditioning=self.use_pretrained_conditioning)
         elif task == "protein_given_ligand":
             protein_indices = self.graph.sample_transition(batch['prot_tokens'].to(self.device), sigma[:, None])
-            log_score = self.score_model(protein_indices=protein_indices, ligand_smiles_str=batch['ligand_smiles'], timesteps = sigma, mode=task, use_pretrained_conditioning=self.use_pretrained_conditioning)
+            log_score = self.score_model(protein_indices=protein_indices, ligand_smiles_str=batch['ligand_smiles'], timesteps = sigma_reshaped, mode=task, use_pretrained_conditioning=self.use_pretrained_conditioning)
 
         else:
             raise NotImplementedError(f"Task {task} not implemented")
@@ -258,6 +260,10 @@ class Train_pl_sedd:
             loss_prot = self.graph_prot.score_entropy(log_score[0], sigma[:, None], protein_indices, batch['prot_tokens']).mean()
             loss_lig = self.graph_lig.score_entropy(log_score[1], sigma[:, None], ligand_indices, batch['lig_tokens']).mean()
             loss = (loss_prot + loss_lig)/2
+            loss = (dsigma[:, None] * loss) 
+            loss_prot = (dsigma[:, None] * loss_prot)
+            loss_lig = (dsigma[:, None] * loss_lig)
+            return loss, loss_prot, loss_lig
         else:
             raise NotImplementedError(f"Task {task} not implemented")
 
@@ -266,14 +272,24 @@ class Train_pl_sedd:
 
     def train_step(self, batch, task):
         scaler = self.state['scaler']
-
-        loss = self.calc_loss(batch, task).mean()
         if task == "all":
             task = np.random.choice(["ligand_given_protein", "protein_given_ligand", "joint"])
             print(f"Training task: {task}")
-            loss = self.calc_loss(batch, task)#.mean()
+        if task == "joint":
+            loss, loss_prot, loss_lig = self.calc_loss(batch, task)
+            loss = loss.mean()
+            loss_prot = loss_prot.mean()
+            loss_lig = loss_lig.mean()
+        else:
+            loss = self.calc_loss(batch, task).mean()
         scaler.scale(loss).backward()
-       
+        if False:
+            if task != "joint":
+                scaler.scale(loss).backward()
+            else:
+                scaler.scale(loss_prot).backward(retain_graph=True)
+                scaler.scale(loss_lig).backward()
+
         self.state['step'] += 1
         self.optimize_fn(self.state['optimizer'], self.score_model.parameters())
         self.state['ema'].update(self.score_model.parameters())
@@ -281,7 +297,25 @@ class Train_pl_sedd:
         self.state['optimizer'].zero_grad()
         self.state['model'] = self.score_model
         self.scheduler.step()
+
+        if task == "joint":
+            return loss, loss_prot, loss_lig
+
         return loss 
+
+    def generate(self, batch):
+        self.ema.copy_to(self.score_model.parameters())
+        with torch.no_grad():
+            esm_cond = None
+            mol_cond = None
+            if 'protein_seq' in batch:
+                esm_cond = batch['protein_seq']
+            if 'ligand_smiles' in batch:
+                mol_cond = batch['ligand_smiles']
+            sampling_shape = (batch['prot_tokens'].shape[0], self.cfg.model.length)
+            sampling_fn = sampling.get_sampling_fn(self.cfg, self.graph, self.noise, sampling_shape, self.sampling_eps, self.device)
+            samples = sampling_fn(self.score_model, esm_cond=esm_cond, mol_cond=mol_cond)
+        return samples
 
     def eval_step(self, batch, model, task, cond=None):
         with torch.no_grad():
@@ -329,11 +363,12 @@ class Train_pl_sedd:
 
         step = self.state['step']
         eval_loss_list = []
+        train_iter = iter(self.train_ds)  # Reset iterator at start of epoch
+        eval_iter = iter(self.eval_ds)
+
         for ep in tqdm(range(self.cfg.training.epochs)):
             #self.train_sampler.set_epoch(ep)  # Ensures data is shuffled differently each epoch
-            train_iter = iter(self.train_ds)  # Reset iterator at start of epoch
-            eval_iter = iter(self.eval_ds)
-
+            
             """
             Training loop
             1. Get train batch
@@ -343,7 +378,8 @@ class Train_pl_sedd:
             5. Log train loss
             """
             
-            while True:
+            #while True:
+            for _it in range(len(self.train_ds)):
                 if step >= num_train_steps:
                     print(f"Reached max training steps: {num_train_steps}. Ending training.")
                     return  # Exit training early
@@ -359,10 +395,16 @@ class Train_pl_sedd:
                     # End of dataset for this epoch
                     break
                 
-                loss = self.train_step(batch, self.task)#, esm_cond=esm_cond, mol_cond=mol_cond)
+                if self.task == "joint":
+                    loss, loss_prot, loss_lig = self.train_step(batch, self.task)
+                else:
+                    loss = self.train_step(batch, self.task)#, esm_cond=esm_cond, mol_cond=mol_cond)
                 #step = self.state['step']
                 # Logging and checkpointing
                 wandb.log({"training_loss": loss.item()})
+                if self.task == "joint":
+                    wandb.log({"training_loss_prot": loss_prot.item()})
+                    wandb.log({"training_loss_lig": loss_lig.item()})
                 if step % self.cfg.training.log_freq == 0:
                     print(f"epoch: {ep}, step: {step}, training_loss: {loss.item():.5e}")
                 if step % self.cfg.training.eval_freq == 0 and step > 0:
