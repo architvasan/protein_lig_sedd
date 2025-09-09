@@ -13,5 +13,5 @@ ppl = prot_evaluator.calculate_mlm_ppl(seqs)
 print("Pseudo-perplexity scores:", ppl)
 '''
 
-cos_dist = prot_evaluator.calculate_emb_cos_distance(seqs, seqs_ref)
-print("Cosine distances to reference sequences:", cos_dist)
+cos_dist = prot_evaluator.calculate_similarity(seqs, seqs_ref)
+print("Lev ratio to reference sequences:", cos_dist)

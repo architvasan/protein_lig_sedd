@@ -38,8 +38,23 @@ class ProteinEvaluator:
         scores['esm_confidence'] = self._calculate_bert_confidence(self.protein_sequences)
         
         return scores
-    def calculate_similarity(self, sequence, reference_sequences):
-        """Calculate sequence similarity to reference set using simple identity metric"""
+    
+    def calculate_similarity(self, sequences, reference_sequences):
+        '''
+        compute Levenshtein ratio 
+        '''
+        import Levenshtein
+        def _ratio(a, b):
+            return Levenshtein.ratio(str(a), str(b))
+    
+        if len(sequences) != len(reference_sequences):
+            raise ValueError("Sequences and reference sequences must be of the same length")
+        return [_ratio(s, r) for s, r in zip(sequences, reference_sequences)]
+
+    def _calculate_similarity(self, sequence, reference_sequences):
+        '''
+        computing pairwise alignment is slow
+        '''
         from Bio import pairwise2
         from Bio.Seq import Seq
         from Bio.Align import substitution_matrices
@@ -114,9 +129,6 @@ class ProteinEvaluator:
             embeddings = []
             with torch.no_grad():
                 for seq in sequences:
-                    if len(seq) > 1024:
-                        embeddings.append(torch.zeros(self.protein_model.config.hidden_size).cpu().numpy())
-                        continue
 
                     tokens = self.protein_tokenizer(seq, return_tensors="pt", padding='max_length', max_length=1022, truncation=True).to('cuda')
                     outputs = mlm_model.base_model(**tokens, output_hidden_states=True)
