@@ -8,10 +8,10 @@ class Tok_Mol:
 
     def __post_init__(self):
         # Load MolFormer models
-        self.mol_tokenizer = AutoTokenizer.from_pretrained(self.mol_model_id, trust_remote_code=True, padding='max_length', max_length=202)
+        self.mol_tokenizer = AutoTokenizer.from_pretrained(self.mol_model_id, trust_remote_code=True, padding='max_length', max_length=128)#202)
     def tokenize(self, smiles_list):
         #Tokenize ligands & get embeddings
-        mol_inputs = self.mol_tokenizer(smiles_list, padding='max_length', max_length=202, truncation=True, return_tensors="pt").to('cuda')
+        mol_inputs = self.mol_tokenizer(smiles_list, padding='max_length', max_length=128, truncation=True, return_tensors="pt").to('cuda')
         return mol_inputs
 
 @dataclass
@@ -20,7 +20,7 @@ class Tok_Prot :
 
     def __post_init__(self):
         # Load ESM2 150M models
-        self.protein_tokenizer = AutoTokenizer.from_pretrained(self.prot_model_id, padding='max_length', max_length=1022)#,  # Pad to 512 tokens)AutoTokenizer.from_pretrained(self.mol_model_id, trust_remote_code=True, padding='max_length', max_length=202)
+        self.protein_tokenizer = AutoTokenizer.from_pretrained(self.prot_model_id, padding='max_length', max_length=512)#1022)#,  # Pad to 512 tokens)AutoTokenizer.from_pretrained(self.mol_model_id, trust_remote_code=True, padding='max_length', max_length=202)
     def tokenize(self, protein_seq_list):
-        protein_inputs = self.protein_tokenizer(protein_seq_list, padding='max_length', max_length=1022, truncation=True, return_tensors="pt").to('cuda')
+        protein_inputs = self.protein_tokenizer(protein_seq_list, padding='max_length', max_length=512, truncation=True, return_tensors="pt").to('cuda')
         return protein_inputs

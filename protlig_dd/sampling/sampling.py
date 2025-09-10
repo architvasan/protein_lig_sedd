@@ -42,7 +42,7 @@ class Predictor(abc.ABC):
         self.noise = noise
 
     @abc.abstractmethod
-    def update_fn(self, score_model, x, t, step_size, task, prot_seq = None, lig_seq = None):
+    def update_fn(self, score_model, x, t, step_size, task, prot_indices = None, lig_indices = None):
         """One update of the predictor.
 
         Args:
@@ -58,20 +58,20 @@ class Predictor(abc.ABC):
 
 @register_predictor(name="euler")
 class EulerPredictor(Predictor):
-    def update_fn(self, score_model, x, t, step_size, task, prot_seq = None, lig_seq = None):
+    def update_fn(self, score_model, x, t, step_size, task, prot_indices = None, lig_indices = None):
         sigma, dsigma = self.noise(t)
         score_model.eval()
         if task == "ligand_given_protein" or task == "ligand_only":
             score = score_model(
                             ligand_indices = x,
+                            protein_indices = prot_indices,
                             timesteps = sigma.reshape(-1),
-                            protein_seq_str = prot_seq,
                             mode = task)
         elif task == "protein_given_ligand" or task == "protein_only":
             score = score_model(
                             protein_indices = x,
+                            ligand_indices = lig_indices,
                             timesteps = sigma.reshape(-1),
-                            ligand_seq_str = lig_seq,
                             mode = task)
         rev_rate = step_size * dsigma[..., None] * self.graph.reverse_rate(x, score)
         x = self.graph.sample_rate(x, rev_rate)
@@ -102,21 +102,21 @@ class Denoiser:
         self.graph = graph
         self.noise = noise
 
-    def update_fn(self, score_model, x, t, step_size, task, prot_seq = None, lig_seq = None):
+    def update_fn(self, score_model, x, t, step_size, task, prot_indices = None, lig_indices = None):
         sigma = self.noise(t)[0]
 
         if task == "ligand_given_protein" or task == "ligand_only":
             score = score_model(
                             ligand_indices = x,
                             timesteps = sigma.reshape(-1),
-                            protein_seq_str = prot_seq,
+                            protein_indices = prot_indices,
                             mode = task)
 
         elif task == "protein_given_ligand" or task == "protein_only":
             score = score_model(
                             protein_indices = x,
                             timesteps = sigma.reshape(-1),
-                            ligand_seq_str = lig_seq,
+                            ligand_indices = lig_indices,
                             mode = task)       
 
         stag_score = self.graph.staggered_score(score, sigma)
@@ -149,7 +149,7 @@ def get_pc_sampler(graph, noise, batch_dims, predictor, steps, denoise=True, eps
     denoiser = Denoiser(graph, noise)
 
     @torch.no_grad()
-    def pc_sampler(model, task, prot_seq = None, lig_seq = None):
+    def pc_sampler(model, task, prot_indices = None, lig_indices = None):
         #sampling_score_fn = mutils.get_score_fn(model, train=False, sampling=True)
         x = graph.sample_limit(*batch_dims).to(device)
         timesteps = torch.linspace(1, eps, steps + 1, device=device)
@@ -158,14 +158,14 @@ def get_pc_sampler(graph, noise, batch_dims, predictor, steps, denoise=True, eps
         for i in range(steps):
             t = timesteps[i] * torch.ones(x.shape[0], 1, device=device)
             x = projector(x)
-            x = predictor.update_fn(score_model=model, x=x, t=t, step_size=dt, task=task, prot_seq = prot_seq, lig_seq = lig_seq)
+            x = predictor.update_fn(score_model=model, x=x, t=t, step_size=dt, task=task, prot_indices = prot_indices, lig_indices = lig_indices)
             
 
         if denoise:
             # denoising step
             x = projector(x)
             t = timesteps[-1] * torch.ones(x.shape[0], 1, device=device)
-            x = denoiser.update_fn(score_model=model, x=x, t=t, step_size=dt, task=task, prot_seq = prot_seq, lig_seq = lig_seq)
+            x = denoiser.update_fn(score_model=model, x=x, t=t, step_size=dt, task=task, prot_indices = prot_indices, lig_indices = lig_indices)
             
         return x
     

@@ -290,6 +290,9 @@ class DDiTBlock(nn.Module):
         
         with torch.cuda.amp.autocast(enabled=False):
             cos, sin = rotary_cos_sin
+            print(cos)
+            print(sin)
+            print(qkv)
             qkv = rotary.apply_rotary_pos_emb(
                 qkv, cos.to(qkv.dtype), sin.to(qkv.dtype)
             )

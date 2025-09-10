@@ -6,7 +6,7 @@
 WORK_DIR=/nfs/ml_lab/projects/ml_lab/avasan/Diffusion/protein_lig_sedd
 ENV_DIR=$WORK_DIR/pl_dd_venv
 CONFIG_FILE=$WORK_DIR/configs/config.yaml
-WANDBPROJ=protlig_sedd_crossatt
+WANDBPROJ=protlig_sedd_crossatt_small_maxlen
 # how to add date/time to WANDBNAME?
 WANDBNAME=plinder_crossatt_$(date +'%d-%m-%Y_%H-%M-%S')
 

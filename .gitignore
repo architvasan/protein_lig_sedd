@@ -3288,3 +3288,5 @@ pl_dd_venv
 input_data/filtered_missing_tokenized.pt
 protlig_dd/sampling/.nfs0000006175fcf6490000b91b
 protlig_dd/sampling/.nfs0000006175fcf64c0000b91a
+protlig_dd/training/run_train_protlig_cross_att.py~
+nohup.out

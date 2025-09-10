@@ -2,6 +2,33 @@ import torch
 from torch import nn
 
 
+class _Rotary(torch.nn.Module):
+    def __init__(self, dim, base=10_000):
+        super().__init__()
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq)
+
+    def forward(self, x, seq_dim=1):
+        seq_len = x.shape[seq_dim]
+        batch_size = x.shape[0]
+
+        # Always compute fresh - don't cache
+        t = torch.arange(seq_len, device=x.device, dtype=self.inv_freq.dtype)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+
+        # Create tensors with correct batch size and device
+        cos = emb.cos()[None, :, None, None, :].expand(batch_size, -1, 3, -1, -1)
+        sin = emb.sin()[None, :, None, None, :].expand(batch_size, -1, 3, -1, -1)
+
+        # Make v transformation identity
+        cos = cos.clone()  # Make it writable
+        sin = sin.clone()
+        cos[:, :, 2, :, :].fill_(1.)
+        sin[:, :, 2, :, :].fill_(0.)
+
+        return cos, sin
+
 class Rotary(torch.nn.Module):
     def __init__(self, dim, base=10_000):
         super().__init__()
@@ -35,18 +62,19 @@ def rotate_half(x):
     )
 
 
-@torch.jit.script
+#@torch.jit.script
 def _apply_rotary_pos_emb_torchscript(qkv, cos, sin):
     return (qkv * cos) + (rotate_half(qkv) * sin)
 
 
 def apply_rotary_pos_emb(qkv, cos, sin):
-    try:
-        import flash_attn.layers.rotary
-        cos = cos[0,:,0,0,:cos.shape[-1]//2]
-        sin = sin[0,:,0,0,:sin.shape[-1]//2]
-        return flash_attn.layers.rotary.apply_rotary_emb_qkv_(
-            qkv, cos, sin
-        )
-    except:
+    #try:
+    #    import flash_attn.layers.rotary
+    #    cos = cos[0,:,0,0,:cos.shape[-1]//2]
+    #    sin = sin[0,:,0,0,:sin.shape[-1]//2]
+    #    return flash_attn.layers.rotary.apply_rotary_emb_qkv_(
+    #        qkv, cos, sin
+    #    )
+    #except:
+    if True:
         return _apply_rotary_pos_emb_torchscript(qkv, cos, sin)
