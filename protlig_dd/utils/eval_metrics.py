@@ -38,8 +38,23 @@ class ProteinEvaluator:
         scores['esm_confidence'] = self._calculate_bert_confidence(self.protein_sequences)
         
         return scores
-    def calculate_similarity(self, reference_sequences):
-        """Calculate sequence similarity to reference set using simple identity metric"""
+    
+    def calculate_similarity(self, sequences, reference_sequences):
+        '''
+        compute Levenshtein ratio 
+        '''
+        import Levenshtein
+        def _ratio(a, b):
+            return Levenshtein.ratio(str(a), str(b))
+    
+        if len(sequences) != len(reference_sequences):
+            raise ValueError("Sequences and reference sequences must be of the same length")
+        return [_ratio(s, r) for s, r in zip(sequences, reference_sequences)]
+
+    def _calculate_similarity(self, sequence, reference_sequences):
+        '''
+        computing pairwise alignment is slow
+        '''
         from Bio import pairwise2
         from Bio.Seq import Seq
         from Bio.Align import substitution_matrices
@@ -47,7 +62,7 @@ class ProteinEvaluator:
         matrix = substitution_matrices.load("BLOSUM62")
         scores = []
         
-        for seq in self.protein_sequences:
+        for seq in sequence:
             max_score = 0
             for ref_seq in reference_sequences:
                 alignments = pairwise2.align.globaldx(seq, ref_seq, matrix)
@@ -102,6 +117,129 @@ class ProteinEvaluator:
                 confidences.append(confidence)
         
         return confidences
+    
+    def calculate_emb_cos_distance(self, sequences, reference_sequences):
+        from sklearn.metrics.pairwise import cosine_distances
+        from transformers import EsmForSequenceClassification
+
+        mlm_model = EsmForSequenceClassification.from_pretrained(self.prot_model_id).to(self.device)
+        mlm_model.eval()
+        
+        def get_embeddings(sequences):
+            embeddings = []
+            with torch.no_grad():
+                for seq in sequences:
+
+                    tokens = self.protein_tokenizer(seq, return_tensors="pt", padding='max_length', max_length=1022, truncation=True).to('cuda')
+                    outputs = mlm_model.base_model(**tokens, output_hidden_states=True)
+                    last_hidden = outputs.hidden_states[-1][0]
+                    mask = tokens['attention_mask'][0].bool()
+                    mean_embedding = last_hidden[mask].mean(dim=0)
+
+                    embeddings.append(mean_embedding.cpu().numpy())
+                    
+            return embeddings
+        
+        prot_embs = get_embeddings(sequences)
+        ref_embs = get_embeddings(reference_sequences)
+        
+        distances = []
+        for prot_emb, ref_emb in zip(prot_embs, ref_embs):
+            dist = cosine_distances([prot_emb], [ref_emb])[0][0]
+            distances.append(dist)
+
+        return distances
+    
+        
+    def calculate_mlm_ppl(self, sequences, batch_size=8, mask_fraction=0.15, seed = 42):
+        """
+        Calculates the MLM score (pseudo-perplexity) for a list of protein sequences.
+
+        This method leverages the ESM model's native Masked Language Model task. It
+        randomly masks a fraction of tokens in each sequence and calculates the
+        model's ability to predict the original tokens at those masked positions.
+        A lower score indicates the model finds the sequence more probable or "natural".
+
+        Args:
+            sequences (list): A list of protein sequence strings to evaluate.
+            batch_size (int): The number of sequences to process in each batch.
+                              Adjust based on GPU memory. Defaults to 8.
+            mask_fraction (float): The fraction of amino acid tokens to mask in each
+                                   sequence. Defaults to 0.15.
+
+        Returns:
+            list: A list of float values, where each value is the pseudo-perplexity
+                  score for the corresponding input sequence.
+        """
+        from transformers import EsmForMaskedLM
+
+        if seed is not None:
+            print(f"Using fixed random seed for masking: {seed}")
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+
+        mlm_model = EsmForMaskedLM.from_pretrained(self.prot_model_id).to(self.device)
+        mlm_model.eval()
+
+        scores = []
+        with torch.no_grad():
+            for i in tqdm(range(0, len(sequences), batch_size), desc="Calculating ESM PPL"):
+                batch_seqs = sequences[i:i + batch_size]
+
+                # 1. Tokenize to get ground truth labels
+                inputs = self.protein_tokenizer(
+                    batch_seqs,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=1022  # Consistent with __post_init__
+                )
+                labels = inputs["input_ids"].to(self.device)
+                attention_mask = inputs["attention_mask"].to(self.device)
+
+                # 2. Create the masked input
+                masked_input_ids = labels.clone()
+                
+                # Determine which tokens are actual amino acids (and can be masked)
+                is_amino_acid = (labels != self.protein_tokenizer.cls_token_id) & \
+                                (labels != self.protein_tokenizer.sep_token_id) & \
+                                (labels != self.protein_tokenizer.pad_token_id)
+                
+                # For each sequence, randomly select positions to mask
+                probability_matrix = torch.full(labels.shape, mask_fraction, device=self.device)
+                masked_indices = torch.bernoulli(probability_matrix).bool() & is_amino_acid
+                
+                masked_input_ids[masked_indices] = self.protein_tokenizer.mask_token_id
+
+                # 3. Get model's predictions (logits) for the masked input
+                outputs = mlm_model(masked_input_ids, attention_mask=attention_mask)
+                logits = outputs.logits
+
+                # 4. Calculate the CrossEntropyLoss only at the masked positions
+                loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
+                loss = loss_fct(logits.view(-1, mlm_model.config.vocab_size), labels.view(-1))
+                loss = loss.view(labels.size())
+
+                # Sum the loss for the masked tokens and count them
+                sum_masked_loss = torch.sum(loss * masked_indices, dim=1)
+                num_masked = torch.sum(masked_indices, dim=1)
+                
+                # Avoid division by zero if a sequence has no masked tokens
+                num_masked = torch.max(num_masked, torch.tensor(1.0, device=self.device))
+                
+                # Calculate the average negative log-likelihood over masked positions
+                mean_nll_masked = sum_masked_loss / num_masked
+                
+                # Pseudo-perplexity is the exponential of the average loss
+                pseudo_ppl = torch.exp(mean_nll_masked)
+                
+                scores.extend(pseudo_ppl.cpu().numpy().tolist())
+
+            # Flatten the scores if batch_size > 1
+            scores = [item for sublist in scores for item in (sublist if isinstance(sublist, list) else [sublist])]
+                
+        return scores
 
 @dataclass
 class LigandEvaluator:
