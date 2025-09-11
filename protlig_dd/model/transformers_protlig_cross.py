@@ -542,11 +542,11 @@ class ProteinLigandDiffusionModel(nn.Module):
         )
         
         # Optional: pretrained encoders for conditioning (can be removed if not needed)
-        self.prot_enc = ProteinEncoderESM(device=config.model.device)
-        self.lig_enc = LigandEncoderMolformer(device=config.model.device)
+        #self.prot_enc = ProteinEncoderESM(device=config.model.device)
+        #self.lig_enc = LigandEncoderMolformer(device=config.model.device)
         # Projectors for pretrained embeddings
-        self.prot_proj = nn.Linear(1280, config.model.hidden_size)  # ESM dim to hidden
-        self.lig_proj = nn.Linear(768, config.model.hidden_size)   # Molformer dim to hidden
+        #self.prot_proj = nn.Linear(1280, config.model.hidden_size)  # ESM dim to hidden
+        #self.lig_proj = nn.Linear(768, config.model.hidden_size)   # Molformer dim to hidden
 
 
     def forward(
