@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torchsummary import summary
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
@@ -32,7 +33,7 @@ import inspect
 import protlig_dd.data.get_embeddings as get_embeddings
 import protlig_dd.sampling.sampling as sampling_dd
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-
+import protlig_dd.utils.model_summ as model_summ
 @dataclass
 class Config:
     dictionary: object | None = None
@@ -131,6 +132,7 @@ class Train_pl_sedd:
     datafile: str
     cfg_fil: str | None = None # either yaml file or dict
     cfg_dict: object | None = None
+    model_weights: str | None = None
     dev_id: str = 'cuda:0'
     seed: int = 42
     sampling_eps: float = 1e-3
@@ -187,6 +189,14 @@ class Train_pl_sedd:
                                                             force_reprocess=False,
                                                             )
 
+    def freeze_model(self, model, freeze_what):
+        for name, param in model.named_parameters():
+            if freeze_what in name:
+                print(f"Freeza {name}")
+                param.requires_grad = False
+        return model
+
+
     def load_model(
             self,
             ):
@@ -195,7 +205,19 @@ class Train_pl_sedd:
         self.graph_lig = graph_lib.get_graph(self.cfg, self.device, tokens=2364)
         # build score model
         self.score_model = ProteinLigandDiffusionModel(self.cfg).to(self.device) #SEDD(self.cfg).to(self.device)
+
+        if self.model_weights!= None:
+            self.score_model.load_state_dict(torch.load(self.model_weights))
+        
+            # Freeze ligand side for protein-only training
+        if self.task in ['protein_given_ligand', 'protein_only']:
+            self.score_model = self.freeze_model(self.score_model, 'lig')        
+        elif self.task in ['ligand_given_protein', 'ligand_only']:
+            self.score_model = self.freeze_model(self.score_model, 'prot')
+
         self.score_model.train()
+        #summary(self.score_model, input_size = (4, 512), batch_size = -1)
+        model_summ.count_parameters(self.score_model)
         #self.score_model = DDP(self.score_model, device_ids = [self.local_rank], output_device = self.local_rank)
         self.ema = ExponentialMovingAverage(
             self.score_model.parameters(), decay=self.cfg.training.ema)
@@ -245,9 +267,10 @@ class Train_pl_sedd:
         elif task == "joint":
             protein_indices = self.graph_prot.sample_transition(batch['prot_tokens'].to(self.device), sigma[:, None])
             ligand_indices = self.graph_lig.sample_transition(batch['lig_tokens'].to(self.device), sigma[:, None])
-            print(f"protein_indices_shape= {protein_indices.shape}, train={training}")
-            print(f"ligand indices= {ligand_indices.shape}, train={training}")
+            #print(f"protein_indices_shape= {protein_indices.shape}, train={training}")
+            #print(f"ligand indices= {ligand_indices.shape}, train={training}")
             log_score = self.score_model(protein_indices=protein_indices, ligand_indices=ligand_indices, timesteps = sigma_reshaped, mode=task)
+            #print(f"log_score dim protein: {log_score[0].shape} \n logscore dim lig: {log_score[1].shape}")
         elif task == "ligand_given_protein":
             ligand_indices = self.graph.sample_transition(batch['lig_tokens'].to(self.device), sigma[:, None])
             log_score = self.score_model(ligand_indices=ligand_indices, protein_seq_str = batch['protein_seq'], timesteps = sigma_reshaped, mode=task, use_pretrained_conditioning=self.use_pretrained_conditioning)
@@ -280,7 +303,7 @@ class Train_pl_sedd:
         scaler = self.state['scaler']
         if task == "all":
             task = np.random.choice(["ligand_given_protein", "protein_given_ligand", "joint"])
-            print(f"Training task: {task}")
+            #print(f"Training task: {task}")
         if task == "joint":
             loss, loss_prot, loss_lig = self.calc_loss(batch, task)
             loss = loss.mean()
@@ -319,7 +342,7 @@ class Train_pl_sedd:
             #print(batch)
             if task == "all":
                 task = np.random.choice(["ligand_given_protein", "protein_given_ligand", "joint"])
-                print(f"Training task: {task}")
+                #print(f"Training task: {task}")
 
             if task == "joint":
                 loss, loss_prot, loss_lig = self.calc_loss(batch, task, training=False)
@@ -357,10 +380,11 @@ class Train_pl_sedd:
 
     def generation(self, sampling_fn, model, tokenizer, task, prot_indices = None, lig_indices = None):
         samples = sampling_fn(model, task, prot_indices = prot_indices, lig_indices = lig_indices)
-        
-        if task in ['protein_given_ligand' or 'protein_only']:
+        #print(f"these are untok samples: {samples}")
+        #print(task)
+        if task in ['protein_given_ligand', 'protein_only']:
             real_samples = tokenizer.protein_tokenizer.batch_decode(samples)
-        elif task in ['ligand_given_protein' or 'ligand_only']:
+        elif task in ['ligand_given_protein', 'ligand_only']:
             real_samples = tokenizer.mol_tokenizer.batch_decode(samples)
         return real_samples
 
@@ -408,7 +432,9 @@ class Train_pl_sedd:
 
         for ep in tqdm(range(self.cfg.training.epochs)):
             #self.train_sampler.set_epoch(ep)  # Ensures data is shuffled differently each epoch
-            
+            train_iter = iter(self.train_ds)  # Reset iterator at start of epoch            
+            eval_iter = iter(self.eval_ds)
+
             """
             Training loop
             1. Get train batch
@@ -426,8 +452,10 @@ class Train_pl_sedd:
 
                 try:
                     batch = next(train_iter)
-                    batch['lig_tokens'] = self.tokenizer_mol.tokenize(batch['ligand_smiles'])['input_ids']
-                    batch ['prot_tokens'] = self.tokenizer_prot.tokenize(batch['protein_seq'])['input_ids']
+                    if batch.get('ligand_smiles'):
+                        batch['lig_tokens'] = self.tokenizer_mol.tokenize(batch['ligand_smiles'])['input_ids']
+                    if batch.get('protein_seq'):
+                        batch ['prot_tokens'] = self.tokenizer_prot.tokenize(batch['protein_seq'])['input_ids']
                     #print(f"Batch ligand smiles: {batch['ligand_smiles']}, protein seq: {batch['protein_seq']}")
                     #print(f"Batch ligand tokens: {batch['lig_tokens']}, protein tokens: {batch['prot_tokens']}")
                     #print(f"Batch ligand tokens shape: {batch['lig_tokens'].shape}, protein tokens shape: {batch['prot_tokens'].shape}")
@@ -450,24 +478,29 @@ class Train_pl_sedd:
                 if step % self.cfg.training.eval_freq == 0 and step > 0:
                     try:
                         batch_eval = next(eval_iter)
-                        batch_eval['lig_tokens'] = self.tokenizer_mol.tokenize(batch_eval['ligand_smiles'])['input_ids']
-                        batch_eval['prot_tokens'] = self.tokenizer_prot.tokenize(batch_eval['protein_seq'])['input_ids']
-                        if self.task != 'joint':
-                            eval_loss = self.eval_step(batch_eval, self.task)#, esm_cond=esm_cond, mol_cond=mol_cond)
-                            
-                            wandb.log({"eval_loss": eval_loss.item()})
-                        else:
-                            eval_loss, eval_loss_prot, eval_loss_lig = self.eval_step(batch_eval, self.task) 
-                            wandb.log({"eval_loss_prot": eval_loss_prot.item()})
-                            wandb.log({"eval_loss_lig": eval_loss_lig.item()})
-                            wandb.log({"eval_loss": eval_loss.item()})
-                        print(f"epoch: {ep}, step: {step}, evaluation_loss: {eval_loss.item():.5e}")
-                        eval_loss_list.append(eval_loss.item())
-                        if eval_loss.item() <= min(eval_loss_list):
-                            utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check_{wandbproj}_{wandbname}.pth', self.state)
+                        if batch_eval.get('ligand_smiles'):
+                            batch_eval['lig_tokens'] = self.tokenizer_mol.tokenize(batch_eval['ligand_smiles'])['input_ids']
+                        if batch_eval.get('protein_seq'):
+                            batch_eval['prot_tokens'] = self.tokenizer_prot.tokenize(batch_eval['protein_seq'])['input_ids']
+                        ##### Turn back on before actual training!!!!!!!! #####
+                        if True:
+                            if self.task != 'joint':
+                                eval_loss = self.eval_step(batch_eval, self.task)#, esm_cond=esm_cond, mol_cond=mol_cond)
+                                
+                                wandb.log({"eval_loss": eval_loss.item()})
+                            else:
+                                eval_loss, eval_loss_prot, eval_loss_lig = self.eval_step(batch_eval, self.task) 
+                                wandb.log({"eval_loss_prot": eval_loss_prot.item()})
+                                wandb.log({"eval_loss_lig": eval_loss_lig.item()})
+                                wandb.log({"eval_loss": eval_loss.item()})
+                            print(f"epoch: {ep}, step: {step}, evaluation_loss: {eval_loss.item():.5e}")
+                            eval_loss_list.append(eval_loss.item())
+                            if eval_loss.item() <= min(eval_loss_list):
+                                utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check_{wandbproj}_{wandbname}.pth', self.state)
                         
-                        if self.task in ['protein_given_ligand', 'joint']:
-                            protein_gen_given_lig = self.generation(
+                        if self.task in ['protein_given_ligand', 'joint', 'protein_only']:
+                            if self.task != 'protein_only':
+                                protein_gen = self.generation(
                                                         self.sampler_prot,
                                                         self.score_model,
                                                         self.tokenizer_prot,
@@ -475,8 +508,17 @@ class Train_pl_sedd:
                                                         prot_indices = None,
                                                         lig_indices = batch_eval['lig_tokens'])
                         
+                            else:
+                                protein_gen = self.generation(
+                                                        self.sampler_prot,
+                                                        self.score_model,
+                                                        self.tokenizer_prot,
+                                                        task='protein_only',
+                                                        prot_indices=None,
+                                                        lig_indices=None)
+
                             print("Generated Proteins given ligands!!!!!")
-                            for pgen in protein_gen_given_lig:
+                            for pgen in protein_gen:
                                 print(pgen)
 
                         if self.task in ['ligand_given_protein', 'joint']:
@@ -506,23 +548,84 @@ class Train_pl_sedd:
                 6. Save checkpoint if needed
                 """
 
-            while True:
-                eval_it = 0
-                if eval_it < 100000000:
-                    try:
-                        batch_eval = next(eval_iter)
+            eval_iter = iter(self.eval_ds)
+
+            for _ in range(len(self.eval_ds)):
+                try:
+                    batch_eval = next(eval_iter)
+                    if batch_eval.get('ligand_smiles'):
                         batch_eval['lig_tokens'] = self.tokenizer_mol.tokenize(batch_eval['ligand_smiles'])['input_ids']
+                    if batch_eval.get('protein_seq'):
                         batch_eval['prot_tokens'] = self.tokenizer_prot.tokenize(batch_eval['protein_seq'])['input_ids']
-                        eval_loss = self.eval_step(batch_eval, self.state['model'], self.task)#, esm_cond=esm_cond, mol_cond=mol_cond)
+                    ##### Turn back on before actual training!!!!!!!! #####
+                    if True:
+                        if self.task != 'joint':
+                            eval_loss = self.eval_step(batch_eval, self.task)#, esm_cond=esm_cond, mol_cond=mol_cond)
+                            
+                            wandb.log({"eval_loss": eval_loss.item()})
+                        else:
+                            eval_loss, eval_loss_prot, eval_loss_lig = self.eval_step(batch_eval, self.task) 
+                            wandb.log({"eval_loss_prot": eval_loss_prot.item()})
+                            wandb.log({"eval_loss_lig": eval_loss_lig.item()})
+                            wandb.log({"eval_loss": eval_loss.item()})
                         print(f"epoch: {ep}, step: {step}, evaluation_loss: {eval_loss.item():.5e}")
-                    except StopIteration:
-                        # End of eval dataset for this epoch
-                        break
-                
-                wandb.log({"eval_loss": eval_loss.item()})
-                eval_loss_list.append(eval_loss.item())
-                if eval_loss.item() <= min(eval_loss_list):
-                    utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check.pth', self.state)
+                        eval_loss_list.append(eval_loss.item())
+                        if eval_loss.item() <= min(eval_loss_list):
+                            utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check_{wandbproj}_{wandbname}.pth', self.state)
+                    
+                    if self.task in ['protein_given_ligand', 'joint', 'protein_only']:
+                        if self.task != 'protein_only':
+                            protein_gen = self.generation(
+                                                    self.sampler_prot,
+                                                    self.score_model,
+                                                    self.tokenizer_prot,
+                                                    task='protein_given_ligand',
+                                                    prot_indices = None,
+                                                    lig_indices = batch_eval['lig_tokens'])
+                    
+                        else:
+                            protein_gen = self.generation(
+                                                    self.sampler_prot,
+                                                    self.score_model,
+                                                    self.tokenizer_prot,
+                                                    task='protein_only',
+                                                    prot_indices=None,
+                                                    lig_indices=None)
+                                                                                                                               
+                        print("Generated Proteins given ligands!!!!!")
+                        for pgen in protein_gen:
+                            print(pgen)
+                                                                                                                               
+                    if self.task in ['ligand_given_protein', 'joint']:
+                        ligand_gen_given_prot = self.generation(
+                                                    self.sampler_lig,
+                                                    self.score_model,
+                                                    self.tokenizer_mol,
+                                                    task='ligand_given_protein',
+                                                    prot_indices = batch_eval['prot_tokens'],
+                                                    lig_indices = None)
+                                                                                                                               
+                        print("Generated Ligands given proteins!!!!!!")
+                        for lgen in ligand_gen_given_prot:
+                            print(lgen)
+                                                                                                                               
+                except StopIteration:
+                    break
+
+               #     try:
+               #         batch_eval = next(eval_iter)
+               #         batch_eval['lig_tokens'] = self.tokenizer_mol.tokenize(batch_eval['ligand_smiles'])['input_ids']
+               #         batch_eval['prot_tokens'] = self.tokenizer_prot.tokenize(batch_eval['protein_seq'])['input_ids']
+               #         eval_loss = self.eval_step(batch_eval, self.state['model'], self.task)#, esm_cond=esm_cond, mol_cond=mol_cond)
+               #         print(f"epoch: {ep}, step: {step}, evaluation_loss: {eval_loss.item():.5e}")
+               #     except StopIteration:
+               #         # End of eval dataset for this epoch
+               #         break
+               # 
+               # wandb.log({"eval_loss": eval_loss.item()})
+               # eval_loss_list.append(eval_loss.item())
+               # if eval_loss.item() <= min(eval_loss_list):
+               #     utils.save_checkpoint(f'{self.checkpoint_meta_dir}/check.pth', self.state)
 
 
         wandb.finish()

@@ -72,24 +72,29 @@ class ImprovedProteinLigandDataset(Dataset):
             Dict with sample data formatted for the unified model
         """
         sample = self.data[idx]
-        
+        processed_sample = {}
         # Create attention masks
-        protein_seq_len = len(sample['protein_seq'])
-        ligand_seq_len = len(sample['ligand_smiles'])
+        if sample.get('protein_seq') is not None:
+            protein_seq_len = len(sample['protein_seq'])
+            protein_mask = torch.zeros(self.max_protein_len, dtype=torch.float)
+            protein_mask[:min(protein_seq_len, self.max_protein_len)] = 1.0
+            processed_sample['protein_mask'] = protein_mask
+            processed_sample['protein_seq'] = sample['protein_seq']
         
-        protein_mask = torch.zeros(self.max_protein_len, dtype=torch.float)
-        protein_mask[:min(protein_seq_len, self.max_protein_len)] = 1.0
-        
-        ligand_mask = torch.zeros(self.max_ligand_len, dtype=torch.float)
-        ligand_mask[:min(ligand_seq_len, self.max_ligand_len)] = 1.0
+        if sample.get('ligand_smiles') is not None:
+            ligand_seq_len = len(sample['ligand_smiles'])
+            ligand_mask = torch.zeros(self.max_ligand_len, dtype=torch.float)
+            ligand_mask[:min(ligand_seq_len, self.max_ligand_len)] = 1.0
+            processed_sample['ligand_mask'] = ligand_mask
+            processed_sample['ligand_smiles'] = sample['ligand_smiles']
         
         # Create processed sample for the unified model
-        processed_sample = {
-            'protein_mask': protein_mask,
-            'ligand_mask': ligand_mask,
-            'protein_seq': sample['protein_seq'],
-            'ligand_smiles': sample['ligand_smiles'],
-        }
+        #processed_sample = {
+        #    'protein_mask': protein_mask,
+        #    'ligand_mask': ligand_mask,
+        #    'protein_seq': sample['protein_seq'],
+        #    'ligand_smiles': sample['ligand_smiles'],
+        #}
         
         # Add protein coordinates if available
         if sample.get('protein_coords') is not None:
@@ -126,15 +131,19 @@ def improved_protein_ligand_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str,
     # Get batch size
     batch_size = len(batch)
     
-    # Find max lengths in the batch
-    max_protein_len = max(len(sample['protein_mask']) for sample in batch)
-    max_ligand_len = max(len(sample['ligand_mask']) for sample in batch)
-    
-    # Initialize tensors with padding
-    protein_tokens = torch.zeros((batch_size, max_protein_len), dtype=torch.long)
-    protein_mask = torch.zeros((batch_size, max_protein_len), dtype=torch.float)
-    ligand_tokens = torch.zeros((batch_size, max_ligand_len), dtype=torch.long)
-    ligand_mask = torch.zeros((batch_size, max_ligand_len), dtype=torch.float)
+    has_protein_seq = all('protein_seq' in sample for sample in batch)
+    has_ligand_smiles = all('ligand_smiles' in sample for sample in batch)
+    if has_protein_seq:
+        # Find max lengths in the batch
+        max_protein_len = max(len(sample['protein_mask']) for sample in batch)
+        # Initialize tensors with padding
+        protein_tokens = torch.zeros((batch_size, max_protein_len), dtype=torch.long)
+        protein_mask = torch.zeros((batch_size, max_protein_len), dtype=torch.float)
+
+    if has_ligand_smiles:
+        max_ligand_len = max(len(sample['ligand_mask']) for sample in batch)
+        ligand_tokens = torch.zeros((batch_size, max_ligand_len), dtype=torch.long)
+        ligand_mask = torch.zeros((batch_size, max_ligand_len), dtype=torch.float)
     
     # Check what optional data is available
     has_protein_coords = all('protein_coords' in sample for sample in batch)
@@ -168,19 +177,24 @@ def improved_protein_ligand_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str,
         interaction_masks = torch.zeros((batch_size, max_protein_len), dtype=torch.float)
     
     # Fill tensors
-    protein_seqs = []
-    ligand_smiles = []
+    if has_protein_seq:
+        protein_seqs = []
+    if has_ligand_smiles:
+        ligand_smiles = []
     system_ids = []
     
     for i, sample in enumerate(batch):
         # Basic protein and ligand data
-        protein_len = len(sample['protein_mask'])
-        ligand_len = len(sample['ligand_mask'])
-        
-        protein_mask[i, :protein_len] = sample['protein_mask'][:protein_len]
-        
-        ligand_mask[i, :ligand_len] = sample['ligand_mask'][:ligand_len]
-        
+        if has_protein_seq:
+            protein_len = len(sample['protein_mask'])
+            protein_mask[i, :protein_len] = sample['protein_mask'][:protein_len]
+            protein_seqs.append(sample['protein_seq'])
+
+        if has_ligand_smiles:
+            ligand_len = len(sample['ligand_mask'])
+            ligand_mask[i, :ligand_len] = sample['ligand_mask'][:ligand_len]
+            ligand_smiles.append(sample['ligand_smiles'])     
+
         # Optional data
         if has_protein_coords:
             coords = sample['protein_coords']
@@ -196,18 +210,22 @@ def improved_protein_ligand_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str,
         if has_interaction:
             mask = sample['interaction_mask']
             interaction_masks[i, :len(mask)] = mask
-        
-        # Store metadata
-        protein_seqs.append(sample['protein_seq'])
-        ligand_smiles.append(sample['ligand_smiles'])
     
     # Create batched sample
-    batched_sample = {
-        'protein_mask': protein_mask,
-        'ligand_mask': ligand_mask,
-        'protein_seq': protein_seqs,
-        'ligand_smiles': ligand_smiles,
-    }
+    batched_sample = {}
+    if has_protein_seq:
+        batched_sample['protein_mask'] = protein_mask
+        batched_sample['protein_seq'] = protein_seqs
+
+    if has_ligand_smiles:
+        batched_sample['ligand_mask'] = ligand_mask
+        batched_sample['ligand_smiles'] = ligand_smiles
+    #batched_sample = {
+    #    'protein_mask': protein_mask,
+    #    'ligand_mask': ligand_mask,
+    #    'protein_seq': protein_seqs,
+    #    'ligand_smiles': ligand_smiles,
+    #}
     
     # Add optional tensors if available
     if has_protein_coords:
@@ -223,12 +241,6 @@ def improved_protein_ligand_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str,
         batched_sample['interaction_mask'] = interaction_masks
     
     return batched_sample
-
-
-
-
-
-
 
 
 def create_improved_data_loaders(

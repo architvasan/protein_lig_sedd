@@ -290,9 +290,9 @@ class DDiTBlock(nn.Module):
         
         with torch.cuda.amp.autocast(enabled=False):
             cos, sin = rotary_cos_sin
-            print(cos)
-            print(sin)
-            print(qkv)
+            #print(cos)
+            #print(sin)
+            #print(qkv)
             qkv = rotary.apply_rotary_pos_emb(
                 qkv, cos.to(qkv.dtype), sin.to(qkv.dtype)
             )
@@ -342,7 +342,17 @@ class DualTrackDiffusionTransformer(nn.Module):
         
         # Transformer blocks
         self.n_blocks = config.model.n_blocks
-        self.blocks = nn.ModuleList([
+        self.blocks_prot = nn.ModuleList([
+            DDiTBlock(
+                config.model.hidden_size, 
+                config.model.n_heads, 
+                config.model.dropout, 
+                config.model.cond_dim,
+                enable_cross_attention=self.enable_cross_attention
+            ) for _ in range(self.n_blocks)
+        ])
+
+        self.blocks_lig = nn.ModuleList([
             DDiTBlock(
                 config.model.hidden_size, 
                 config.model.n_heads, 
@@ -374,10 +384,12 @@ class DualTrackDiffusionTransformer(nn.Module):
         if track_type == "protein":
             x = self.protein_embed(indices)
             output_layer = self.protein_output
-        else:  # ligand
+        elif track_type == 'ligand':  # ligand
             x = self.ligand_embed(indices)
             output_layer = self.ligand_output
-        
+        else:
+            raise ValueError('track type not supported')
+
         # Timestep conditioning
         c = F.silu(self.sigma_map(sigma))
         
@@ -385,19 +397,35 @@ class DualTrackDiffusionTransformer(nn.Module):
         rotary_cos_sin = self.rotary_emb(x)
         
         # Pass through transformer blocks
-        with torch.cuda.amp.autocast(dtype=torch.float32):
-            for i in range(self.n_blocks):
-                x = self.blocks[i](
-                    x, 
-                    rotary_cos_sin, 
-                    c, 
-                    other_track=other_track_hidden,
-                    other_mask=other_track_mask,
-                    seqlens=None
-                )
+        if track_type == 'protein':
+            with torch.cuda.amp.autocast(dtype=torch.float32):
+                for i in range(self.n_blocks):
+                    x = self.blocks_prot[i](
+                        x, 
+                        rotary_cos_sin, 
+                        c, 
+                        other_track=other_track_hidden,
+                        other_mask=other_track_mask,
+                        seqlens=None
+                    )
+
+        elif track_type == 'ligand':
+            with torch.cuda.amp.autocast(dtype=torch.float32):
+                for i in range(self.n_blocks):
+                    x = self.blocks_lig[i](
+                        x, 
+                        rotary_cos_sin, 
+                        c, 
+                        other_track=other_track_hidden,
+                        other_mask=other_track_mask,
+                        seqlens=None
+                    )
+
+        else:
+            raise ValueError("track type not supported")
         
-            # Final output projection
-            x = output_layer(x, c)
+        # Final output projection
+        x = output_layer(x, c)
         
         # Scale by sigma if needed
         if self.scale_by_sigma and self.absorb:
@@ -421,7 +449,7 @@ class DualTrackDiffusionTransformer(nn.Module):
        # This prevents the model from predicting the original token at those positions.
        # For example, if indices = [2, 0, 1] for a sequence of length 3,
        # it will set x[:, 0, 2], x[:, 1, 0], x[:, 2, 1] to zero. 
-
+        #print(f"Single track shape {x.size()}")
         return x
 
     def forward_joint(
@@ -450,7 +478,7 @@ class DualTrackDiffusionTransformer(nn.Module):
         with torch.cuda.amp.autocast(dtype=torch.float32):
             for i in range(self.n_blocks):
                 # Update protein track (attending to ligand)
-                new_protein = self.blocks[i](
+                new_protein = self.blocks_prot[i](
                     protein_hidden,
                     protein_rotary,
                     c,
@@ -460,7 +488,7 @@ class DualTrackDiffusionTransformer(nn.Module):
                 )
                 
                 # Update ligand track (attending to protein)
-                new_ligand = self.blocks[i](
+                new_ligand = self.blocks_lig[i](
                     ligand_hidden,
                     ligand_rotary,
                     c,
@@ -583,7 +611,7 @@ class ProteinLigandDiffusionModel(nn.Module):
                 c = F.silu(self.transformer.sigma_map(timesteps))
                 rotary_cos_sin = self.transformer.rotary_emb(protein_hidden)
                 for i in range(self.transformer.n_blocks // 2):  # Use first half of blocks
-                    protein_hidden = self.transformer.blocks[i](
+                    protein_hidden = self.transformer.blocks_prot[i](
                         protein_hidden, rotary_cos_sin, c, None, None, None
                     )
             
@@ -609,7 +637,7 @@ class ProteinLigandDiffusionModel(nn.Module):
                 c = F.silu(self.transformer.sigma_map(timesteps))
                 rotary_cos_sin = self.transformer.rotary_emb(ligand_hidden)
                 for i in range(self.transformer.n_blocks // 2):
-                    ligand_hidden = self.transformer.blocks[i](
+                    ligand_hidden = self.transformer.blocks_lig[i](
                         ligand_hidden, rotary_cos_sin, c, None, None, None
                     )
             

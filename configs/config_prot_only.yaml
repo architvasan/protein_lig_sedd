@@ -31,7 +31,7 @@ training:
   n_iters: 10000000 #10_000
   snapshot_freq: 200 #1_000
   log_freq: 50
-  eval_freq: 3
+  eval_freq: 500
   snapshot_freq_for_preemption: 200
   weight: standard
   snapshot_sampling: True

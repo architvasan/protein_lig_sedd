@@ -13,6 +13,7 @@ model:
   esm_dim: 640 #332 #1024
   molformer_dim: 768
   device: cuda:0
+
 defaults:
   - _self_
   - model: tiny
@@ -21,7 +22,7 @@ ngpus: 1
 tokens: 2396 #39 #25
 
 training:
-  batch_size: 4
+  batch_size: 16
   accum: 1
   epochs: 10
   max_samples: 10000000000
@@ -31,19 +32,19 @@ training:
   n_iters: 10000000 #10_000
   snapshot_freq: 200 #1_000
   log_freq: 50
-  eval_freq: 3
+  eval_freq: 1000
   snapshot_freq_for_preemption: 200
   weight: standard
   snapshot_sampling: True
   ema: 0.9999
-  task: joint
+  task: protein_only
 data:
   train: acyp
   valid: acyp
   cache_dir: data
   train_ratio: 0.8
   val_ratio: 0.1
-  max_protein_len: 1024
+  max_protein_len: 512
   max_ligand_len: 128
   use_structure: False
 
@@ -59,7 +60,7 @@ noise:
   eps: !!float "0.1"
 sampling:
   predictor: euler
-  steps: 250
+  steps: 25
   noise_removal: True
 
 eval:

@@ -28,7 +28,17 @@ class Reader_Converter:
                     line = line.strip()
                     if not line.startswith('>') and line:  # Skip header lines and empty lines
                         self.data_inp.append(line)
+        elif self.filetype == 'smi':
+            # Read from file
+            with open(self.inp_file, 'r') as f:
+                self.data_inp = []
+                for line in f:
+                    line = line.strip()
+                    data_it = line.split()[1]
+                    #if not line.startswith('>') and line:  # Skip header lines and empty lines
+                    self.data_inp.append(data_it)
 
+        
     def build_dataset_pd(self):
         self.dict_list = []
         for it, (_, row) in enumerate(self.data_inp.iterrows()):
@@ -42,7 +52,10 @@ class Reader_Converter:
                 self.save_pt()
 
     def build_dataset_fasta(self):
-        self.dict_list = [{'protein_seq': dat} for dat in self.data_inp]
+        self.dict_list = [{'protein_seq': dat} for dat in self.data_inp if len(dat) <= 512]
+
+    def build_dataset_smi(self):
+        self.dict_list = [{'ligand_smiles': dat} for dat in self.data_inp]
         
     def save_pt(self):
         torch.save(self.dict_list, self.out_file)
@@ -53,6 +66,9 @@ class Reader_Converter:
         elif self.filetype == 'fasta':
             self.build_dataset_fasta()
             self.save_pt()
+        elif self.filetype == 'smi':
+            self.build_dataset_smi()
+            self.save_pt()
 
 def main():
     import argparse
@@ -61,7 +77,7 @@ def main():
     
     # Required arguments
     parser.add_argument('--filetype', '-f', type=str, required=True,
-                        choices=['fasta', 'tsv', 'csv'],
+                        choices=['fasta', 'tsv', 'csv', 'smi'],
                         help='Input file type (fasta, tsv, or csv)')
     
     parser.add_argument('--inp_file', '-i', type=str, required=True,
@@ -93,7 +109,7 @@ def main():
     if args.modalities in ['protein_seq', 'protein_ligand'] and args.filetype != 'fasta' and not args.protein_column:
         raise ValueError("protein_column must be specified for protein_seq or protein_ligand modalities with csv/tsv files")
     
-    if args.modalities in ['ligand_smiles', 'protein_ligand'] and not args.smiles_column:
+    if args.modalities in ['ligand_smiles', 'protein_ligand'] and args.filetype != 'smi' and not args.smiles_column:
         raise ValueError("smiles_column must be specified for ligand_smiles or protein_ligand modalities")
     
     # Create output directory if it doesn't exist

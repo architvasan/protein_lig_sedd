@@ -8,7 +8,7 @@ ENV_DIR=$WORK_DIR/pl_dd_venv
 CONFIG_FILE=$WORK_DIR/configs/config.yaml
 WANDBPROJ=protlig_sedd_crossatt_small_maxlen
 # how to add date/time to WANDBNAME?
-WANDBNAME=plinder_crossatt_$(date +'%d-%m-%Y_%H-%M-%S')
+WANDBNAME=plinder_crossatt_staged_learn$(date +'%d-%m-%Y_%H-%M-%S')
 
 DATAFILE=$WORK_DIR/input_data/filtered_missing_tokenized.pt
 MOL_EMB_ID=ibm/MoLFormer-XL-both-10pct
