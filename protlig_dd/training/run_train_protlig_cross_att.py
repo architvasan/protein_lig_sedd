@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torchsummary import summary
+#from torchsummary import summary
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
@@ -272,10 +272,10 @@ class Train_pl_sedd:
             log_score = self.score_model(protein_indices=protein_indices, ligand_indices=ligand_indices, timesteps = sigma_reshaped, mode=task)
             #print(f"log_score dim protein: {log_score[0].shape} \n logscore dim lig: {log_score[1].shape}")
         elif task == "ligand_given_protein":
-            ligand_indices = self.graph.sample_transition(batch['lig_tokens'].to(self.device), sigma[:, None])
+            ligand_indices = self.graph_lig.sample_transition(batch['lig_tokens'].to(self.device), sigma[:, None])
             log_score = self.score_model(ligand_indices=ligand_indices, protein_seq_str = batch['protein_seq'], timesteps = sigma_reshaped, mode=task, use_pretrained_conditioning=self.use_pretrained_conditioning)
         elif task == "protein_given_ligand":
-            protein_indices = self.graph.sample_transition(batch['prot_tokens'].to(self.device), sigma[:, None])
+            protein_indices = self.graph_prot.sample_transition(batch['prot_tokens'].to(self.device), sigma[:, None])
             log_score = self.score_model(protein_indices=protein_indices, ligand_smiles_str=batch['ligand_smiles'], timesteps = sigma_reshaped, mode=task, use_pretrained_conditioning=self.use_pretrained_conditioning)
 
         else:
