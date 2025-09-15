@@ -6,7 +6,7 @@ model:
   hidden_size: 1024 #768
   cond_dim: 128 #512 #28
   length: 1224 #36 #128
-  n_blocks: 12
+  n_blocks: 32
   n_heads: 32
   scale_by_sigma: True
   dropout: 0.1
@@ -22,7 +22,7 @@ ngpus: 1
 tokens: 2396 #39 #25
 
 training:
-  batch_size: 16
+  batch_size: 4
   accum: 1
   epochs: 10
   max_samples: 10000000000
@@ -38,7 +38,6 @@ training:
   snapshot_sampling: True
   ema: 0.9999
   task: protein_only
-
 data:
   train: acyp
   valid: acyp
@@ -48,8 +47,6 @@ data:
   max_protein_len: 512
   max_ligand_len: 128
   use_structure: False
-  vocab_size_protein: 36
-  vocab_size_ligand: 2364
 
 graph:
   type: absorb

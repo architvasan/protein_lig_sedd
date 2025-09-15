@@ -3293,3 +3293,7 @@ nohup.out
 input_data/
 protlig_dd/training/OLD/
 protlig_dd/training/run_train_protlig_staged.py
+run_train_protonly_t2.sh
+run_train_protonly_t3.sh
+run_train_protonly_t4.sh
+run_train_protonly_t5.sh

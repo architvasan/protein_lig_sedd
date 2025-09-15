@@ -6,7 +6,8 @@ model:
   hidden_size: 1024 #768
   cond_dim: 128 #512 #28
   length: 1224 #36 #128
-  n_blocks: 12
+  n_blocks_prot: 12
+  n_blocks_lig: 12
   n_heads: 32
   scale_by_sigma: True
   dropout: 0.1
