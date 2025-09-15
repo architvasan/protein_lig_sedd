@@ -74,6 +74,7 @@ class EulerPredictor(Predictor):
                             ligand_indices = lig_indices,
                             timesteps = sigma.reshape(-1),
                             mode = task)
+        score = score.exp()
         rev_rate = step_size * dsigma[..., None] * self.graph.reverse_rate(x, score)
         x = self.graph.sample_rate(x, rev_rate)
         return x
@@ -120,6 +121,7 @@ class Denoiser:
                             ligand_indices = lig_indices,
                             mode = task)       
 
+        score = score.exp()
         stag_score = self.graph.staggered_score(score, sigma)
         probs = stag_score * self.graph.transp_transition(x, sigma)
         # truncate probabilities

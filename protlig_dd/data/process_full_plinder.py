@@ -37,7 +37,7 @@ class ImprovedProteinLigandDataset(Dataset):
     the unified model.
     """
     
-    def __init__(self, data_file: Union[str, Path], max_protein_len: int = 1024, max_ligand_len: int = 128):
+    def __init__(self, data_file: Union[str, Path], max_protein_len: int = 512, max_ligand_len: int = 128):
         """
         Initialize the dataset.
         

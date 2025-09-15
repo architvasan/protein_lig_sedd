@@ -233,6 +233,16 @@ class Absorbing(Graph):
         )[..., None]
         return edge
 
+    def sample_transition_curriculum(self, i, sigma, training_step, preschool_time=10000):
+        # Start with easier corruption, gradually increase difficulty
+        curriculum_factor = min(1.0, training_step / preschool_time)
+        adjusted_sigma = sigma * curriculum_factor
+        
+        move_chance = 1 - (-adjusted_sigma).exp()
+        move_indices = torch.rand(*i.shape, device=i.device) < move_chance
+        i_pert = torch.where(move_indices, self.dim - 1, i)
+        return i_pert
+
     def sample_transition(self, i, sigma):
         move_chance = 1 - (-sigma).exp()
         move_indices = torch.rand(*i.shape, device=i.device) < move_chance

@@ -22,8 +22,6 @@ import protlig_dd.utils.utils as utils
 from protlig_dd.model.transformers_protlig_cross import ProteinLigandDiffusionModel
 from protlig_dd.model.ema import ExponentialMovingAverage
 from transformers import GPT2TokenizerFast, GPT2LMHeadModel
-#from SmilesPE.tokenizer import *
-#from smallmolec_campaign.utils.smiles_pair_encoders_functions import *
 from protlig_dd.data.process_full_plinder import create_improved_data_loaders#ddp_data_loaders
 from protlig_dd.data.tokenize import Tok_Mol, Tok_Prot
 from protlig_dd.utils.lr_scheduler import WarmupCosineLR
@@ -290,54 +288,55 @@ class Train_pl_sedd:
         
         sigma, dsigma = self.noise(t)
         sigma_reshaped = sigma.reshape(-1)
+
         # Handle different task types
         if task == "protein_only":
-            protein_indices = self.graph_prot.sample_transition(
-                batch['prot_tokens'].to(self.device), sigma[:, None]
+            protein_indices_pert = self.graph_prot.sample_transition_curriculum(
+                batch['prot_tokens'].to(self.device), sigma[:, None], self.state['step']
             )
             log_score = self.score_model(
-                protein_indices=protein_indices, 
+                protein_indices=protein_indices_pert, 
                 timesteps=sigma_reshaped, 
                 mode=task
             )
             loss = self.graph_prot.score_entropy(
-                log_score, sigma[:, None], protein_indices, batch['prot_tokens'].to(self.device)
+                log_score, sigma[:, None], protein_indices_pert, batch['prot_tokens'].to(self.device)
             )
             
         elif task == "ligand_only":
-            ligand_indices = self.graph_lig.sample_transition(
-                batch['lig_tokens'].to(self.device), sigma[:, None]
+            ligand_indices_pert = self.graph_lig.sample_transition_curriculum(
+                batch['lig_tokens'].to(self.device), sigma[:, None], self.state['step']
             )
             log_score = self.score_model(
-                ligand_indices=ligand_indices, 
+                ligand_indices=ligand_indices_pert, 
                 timesteps=sigma_reshaped, 
                 mode=task
             )
             loss = self.graph_lig.score_entropy(
-                log_score, sigma[:, None], ligand_indices, batch['lig_tokens'].to(self.device)
+                log_score, sigma[:, None], ligand_indices_pert, batch['lig_tokens'].to(self.device)
             )
             
         elif task == "joint":
-            protein_indices = self.graph_prot.sample_transition(
-                batch['prot_tokens'].to(self.device), sigma[:, None]
+            protein_indices_pert = self.graph_prot.sample_transition_curriculum(
+                batch['prot_tokens'].to(self.device), sigma[:, None], self.state['step']
             )
-            ligand_indices = self.graph_lig.sample_transition(
-                batch['lig_tokens'].to(self.device), sigma[:, None]
+            ligand_indices_pert = self.graph_lig.sample_transition_curriculum(
+                batch['lig_tokens'].to(self.device), sigma[:, None], self.state['step']
             )
             
             log_score = self.score_model(
-                protein_indices=protein_indices, 
-                ligand_indices=ligand_indices, 
+                protein_indices=protein_indices_pert, 
+                ligand_indices=ligand_indices_pert, 
                 timesteps=sigma_reshaped, 
                 mode=task
             )
             
             # Calculate separate losses
             loss_prot = self.graph_prot.score_entropy(
-                log_score[0], sigma[:, None], protein_indices, batch['prot_tokens'].to(self.device)
+                log_score[0], sigma[:, None], protein_indices_pert, batch['prot_tokens'].to(self.device)
             )
             loss_lig = self.graph_lig.score_entropy(
-                log_score[1], sigma[:, None], ligand_indices, batch['lig_tokens'].to(self.device)
+                log_score[1], sigma[:, None], ligand_indices_pert, batch['lig_tokens'].to(self.device)
             )
             
             # Weight losses with dsigma
@@ -464,7 +463,6 @@ class Train_pl_sedd:
             # Apply EMA weights for generation
             self.ema.store(self.score_model.parameters())
             self.ema.copy_to(self.score_model.parameters())
-
 
         samples = sampling_fn(self.score_model, task, prot_indices = prot_indices, lig_indices = lig_indices)
 
@@ -714,14 +712,14 @@ class Train_pl_sedd:
                 
                 if protein_gen:
                     print("\nGenerated Proteins:")
-                    for i, pgen in enumerate(protein_gen[:3]):  # Show first 3
-                        print(f"  {i+1}: {pgen[:100]}...")  # Show first 100 chars
+                    for i, pgen in enumerate(protein_gen):  # Show first 3
+                        print(f"  {i+1}: {pgen}...")  # Show first 100 chars
                     
                     # Log to wandb
                     wandb.log({
                         "generated_proteins": wandb.Table(
                             columns=["index", "sequence"],
-                            data=[[i, seq[:200]] for i, seq in enumerate(protein_gen[:5])]
+                            data=[[i, seq] for i, seq in enumerate(protein_gen)]
                         )
                     })
             
@@ -744,14 +742,14 @@ class Train_pl_sedd:
                 
                 if ligand_gen:
                     print("\nGenerated Ligands:")
-                    for i, lgen in enumerate(ligand_gen[:3]):  # Show first 3
+                    for i, lgen in enumerate(ligand_gen):  # Show first 3
                         print(f"  {i+1}: {lgen}")
                     
                     # Log to wandb
                     wandb.log({
                         "generated_ligands": wandb.Table(
                             columns=["index", "smiles"],
-                            data=[[i, smiles] for i, smiles in enumerate(ligand_gen[:5])]
+                            data=[[i, smiles] for i, smiles in enumerate(ligand_gen)]
                         )
                     })
                     
