@@ -8,7 +8,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torchsummary import summary
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
@@ -685,7 +684,7 @@ class Train_pl_sedd:
             print(f"Saved best model with eval loss: {avg_eval_loss:.5e}")
         
         # Generate samples for visualization
-        if is_end_of_epoch or (step % (self.cfg.training.eval_freq * 5) == 0):
+        if is_end_of_epoch or (step % (self.cfg.training.eval_freq * 1) == 0):
             self.generate_samples(batch_eval)
         
         return best_eval_loss

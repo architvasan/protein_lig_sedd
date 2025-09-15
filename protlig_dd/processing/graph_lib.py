@@ -233,9 +233,21 @@ class Absorbing(Graph):
         )[..., None]
         return edge
 
-    def sample_transition_curriculum(self, i, sigma, training_step, preschool_time=10000):
+    def sample_transition_curriculum(self, i, sigma, training_step, preschool=100, elementary=500, middle=1000, high=1500, adult=2000):
         # Start with easier corruption, gradually increase difficulty
-        curriculum_factor = min(1.0, training_step / preschool_time)
+        if training_step<preschool:
+            curriculum_factor = 3
+        elif training_step in range(preschool, elementary):
+            curriculum_factor = 3 - min(1.0, training_step/elementary) 
+        elif training_step in range(elementary, middle):
+            curriculum_factor = 2
+        elif training_step in range(middle, high):
+            curriculum_factor = 2 - min(1.0, training_step/high)*0.8
+        elif training_step in range(high, adult):
+            curriculum_factor = 1.2
+        else:
+            curriculum_factor = 1
+        #curriculum_factor = min(1.0, training_step / preschool_time)
         adjusted_sigma = sigma * curriculum_factor
         
         move_chance = 1 - (-adjusted_sigma).exp()

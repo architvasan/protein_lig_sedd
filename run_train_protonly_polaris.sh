@@ -21,12 +21,14 @@ SEED=42
 ########################
 
 cd $WORK_DIR
+module use /soft/modulefiles
+module load conda
 source ${ENV_DIR}/bin/activate
 
 #######################
 #### RUNNING TRAINING WITH VARIABLES###
 #####################
-CUDA_VISIBLE_DEVICES=4 python -m protlig_dd.training.run_train_protlig_cross_att_improved \
+CUDA_VISIBLE_DEVICES=0 python -m protlig_dd.training.run_train_protlig_cross_att_improved \
     -WD $WORK_DIR\
     -cf $CONFIG_FILE\
     -wp $WANDBPROJ\
