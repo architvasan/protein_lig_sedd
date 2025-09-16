@@ -1,0 +1,115 @@
+# Improved UniRef50 SEDD Training Configuration
+# Optimized for stable training and convergence
+
+work_dir: /Users/ramanathana/Work/Protein-Ligand-SEDD/protein_lig_sedd
+
+model:
+  name: medium           
+  type: ddit
+  hidden_size: 768
+  cond_dim: 256
+  length: 512
+  n_blocks_prot: 8
+  n_blocks_lig: 8
+  n_heads: 12
+  scale_by_sigma: True
+  dropout: 0.1          # Reduced dropout for better learning
+  esm_dim: 640
+  molformer_dim: 768
+  device: cuda:0
+
+defaults:
+  - _self_
+  - model: medium
+
+ngpus: 1
+tokens: 36
+
+training:
+  batch_size: 32
+  accum: 4              # Effective batch size = 128
+  epochs: 50
+  max_samples: 50000000
+  num_workers: 4
+  seed: 42
+  force_reprocess: False
+  n_iters: 500000
+  snapshot_freq: 2000   # Less frequent saves
+  log_freq: 50          # More frequent logging
+  eval_freq: 1000
+  snapshot_freq_for_preemption: 2000
+  weight: standard
+  snapshot_sampling: True
+  ema: 0.9995           # More conservative EMA
+
+data:
+  train: uniref50
+  valid: uniref50
+  cache_dir: data
+  train_ratio: 0.95
+  val_ratio: 0.05
+  max_protein_len: 512
+  max_ligand_len: 128
+  use_structure: False
+  vocab_size_protein: 36
+  vocab_size_ligand: 2364
+
+graph:
+  type: absorb
+  file: data
+  report_all: False
+
+noise:
+  type: cosine
+  sigma_min: !!float "1e-4"
+  sigma_max: 0.5        # Reduced for stability
+  eps: !!float "0.02"   # Smaller epsilon
+
+sampling:
+  predictor: euler
+  steps: 100
+  noise_removal: True
+
+eval:
+  batch_size: 16
+  perplexity: True
+  perplexity_batch_size: 8
+
+optim:
+  weight_decay: 0.01
+  optimizer: AdamW
+  lr: !!float "5e-5"    # Reduced learning rate
+  beta1: 0.9
+  beta2: 0.999          # Standard beta2
+  eps: !!float "1e-8"
+  warmup: 10000         # Longer warmup
+  grad_clip: 0.5        # Gentler gradient clipping
+
+# Learning rate schedule
+lr_schedule:
+  type: cosine_with_warmup
+  warmup_steps: 10000
+  max_steps: 500000
+  min_lr_ratio: 0.01    # Lower minimum LR
+
+# Curriculum learning - more conservative
+curriculum:
+  enabled: True
+  preschool_time: 20000  # Slower ramp-up
+  difficulty_ramp: linear  # More predictable progression
+
+# Memory optimization
+memory:
+  gradient_checkpointing: False  # Disable for V100 model
+  mixed_precision: True
+  max_memory_per_gpu: 0.9
+
+# Enhanced monitoring
+monitoring:
+  log_gradients: True
+  log_weights: False
+  sample_frequency: 2000
+  
+hydra:
+  run:
+    dir: exp_local/uniref50/${now:%Y.%m.%d}/${now:%H%M%S}

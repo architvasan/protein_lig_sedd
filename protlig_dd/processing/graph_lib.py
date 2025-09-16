@@ -233,11 +233,35 @@ class Absorbing(Graph):
         )[..., None]
         return edge
 
-    def sample_transition_curriculum(self, i, sigma, training_step, preschool_time=10000):
-        # Start with easier corruption, gradually increase difficulty
-        curriculum_factor = min(1.0, training_step / preschool_time)
-        adjusted_sigma = sigma * curriculum_factor
-        
+    def sample_transition_curriculum(self, i, sigma, training_step, preschool_time=5000, curriculum_type="exponential"):
+        """
+        Improved curriculum learning with multiple strategies.
+
+        Args:
+            i: Input tokens
+            sigma: Noise level
+            training_step: Current training step
+            preschool_time: Steps to reach full difficulty
+            curriculum_type: "linear", "exponential", or "cosine"
+        """
+        if curriculum_type == "exponential":
+            # Exponential ramp-up: starts slow, accelerates
+            progress_ratio = float(training_step) / float(preschool_time)
+            curriculum_factor = 1.0 - torch.exp(torch.tensor(-3.0 * progress_ratio))
+            curriculum_factor = min(1.0, curriculum_factor.item())
+        elif curriculum_type == "cosine":
+            # Cosine ramp-up: smooth acceleration
+            progress = min(1.0, float(training_step) / float(preschool_time))
+            curriculum_factor = 0.5 * (1 - torch.cos(torch.tensor(torch.pi * progress)))
+            curriculum_factor = curriculum_factor.item()
+        else:
+            # Linear ramp-up (original)
+            curriculum_factor = min(1.0, float(training_step) / float(preschool_time))
+
+        # Apply curriculum with minimum difficulty to prevent too-easy training
+        min_difficulty = 0.1  # Always maintain some noise
+        adjusted_sigma = sigma * (min_difficulty + curriculum_factor * (1.0 - min_difficulty))
+
         move_chance = 1 - (-adjusted_sigma).exp()
         move_indices = torch.rand(*i.shape, device=i.device) < move_chance
         i_pert = torch.where(move_indices, self.dim - 1, i)

@@ -1,0 +1,20 @@
+# Wandb Configuration for SEDD Training
+
+# Project settings
+project: uniref50-sedd
+entity: your-wandb-username  # Replace with your wandb username
+
+# Default tags
+tags:
+  - uniref50
+  - sedd
+  - protein
+  - diffusion
+
+# Notes template
+notes: |
+  Optimized UniRef50 training with improved attention mechanism
+  and curriculum learning strategies.
+
+# Settings
+save_code: true
