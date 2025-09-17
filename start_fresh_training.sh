@@ -100,7 +100,7 @@ python -m protlig_dd.training.run_train_uniref50_optimized \
     --wandb_name "$RUN_NAME" \
     --device "$DEVICE" \
     --seed "$SEED" \
-    $FRESH_FLAG
+    $FRESH_FLAG >logs/train_uniref50_opt.log 2> logs/train_uniref50_opt.err
 
 # Check exit status
 if [ $? -eq 0 ]; then
