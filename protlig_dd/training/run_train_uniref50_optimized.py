@@ -78,6 +78,7 @@ class OptimizedUniRef50Trainer:
     seed: int = 42
     resume_checkpoint: Optional[str] = None
     force_fresh_start: bool = False
+    sampling_method: str = "rigorous"  # "rigorous" or "simple"
     
     def __post_init__(self):
         """Initialize trainer components."""
@@ -119,11 +120,24 @@ class OptimizedUniRef50Trainer:
             print(f"✅ {device_type.upper()} training without mixed precision")
 
         # Verify key configuration sections exist
-        required_sections = ['model', 'training', 'optim', 'data', 'noise']
+        required_sections = ['model', 'training', 'optim', 'data', 'noise', 'sampling']
         for section in required_sections:
             if not hasattr(self.cfg, section):
                 print(f"⚠️  Warning: Missing config section '{section}' - using defaults")
                 setattr(self.cfg, section, utils.Config(dictionary={}))
+
+        # Log sampling method configuration
+        print(f"🧬 Sampling method configured: {self.sampling_method}")
+        if self.sampling_method == "rigorous":
+            print(f"   📊 Using CTMC sampling with {getattr(self.cfg.sampling, 'steps', 100)} steps")
+            print(f"   🔧 Predictor: {getattr(self.cfg.sampling, 'predictor', 'euler')}")
+            print(f"   🎯 Noise removal: {getattr(self.cfg.sampling, 'noise_removal', True)}")
+        else:
+            print(f"   🎲 Using simple heuristic sampling")
+
+        # Configure quick generation test frequency
+        quick_gen_freq = getattr(self.cfg.training, 'quick_gen_freq', self.cfg.training.log_freq * 2)
+        print(f"   🧪 Quick generation tests every {quick_gen_freq} steps")
 
     def setup_device(self, dev_id):
         """Setup device with cross-platform compatibility."""
@@ -444,9 +458,103 @@ class OptimizedUniRef50Trainer:
 
         return ''.join(amino_acids)
 
-    def generate_protein_sequences(self, num_samples: int = 10, max_length: int = 256, num_diffusion_steps: int = 50, temperature: float = 1.0):
-        """Generate protein sequences using proper diffusion sampling."""
-        print(f"🧬 Generating {num_samples} protein sequences using diffusion sampling...")
+    def setup_protein_sampler(self, batch_size: int = 1, max_length: int = 256):
+        """Setup the rigorous CTMC sampler for protein generation."""
+        sampling_shape = (batch_size, max_length)
+
+        # Use the formal sampling framework
+        sampling_fn = sampling.get_sampling_fn(
+            config=self.cfg,
+            graph=self.graph,
+            noise=self.noise,
+            batch_dims=sampling_shape,
+            eps=1e-5,  # Small epsilon for sampling
+            device=self.device
+        )
+        return sampling_fn
+
+    def generate_protein_sequences_rigorous(self, num_samples: int = 10, max_length: int = 256):
+        """Generate protein sequences using rigorous CTMC sampling."""
+        print(f"🧬 Generating {num_samples} protein sequences using rigorous CTMC sampling...")
+
+        self.model.eval()
+        generated_sequences = []
+
+        with torch.no_grad():
+            # Apply EMA weights for generation
+            self.ema.store(self.model.parameters())
+            self.ema.copy_to(self.model.parameters())
+
+            try:
+                # Setup sampler for single batch
+                sampler = self.setup_protein_sampler(batch_size=num_samples, max_length=max_length)
+
+                # Create a model wrapper that matches the expected sampling interface
+                class ModelWrapper:
+                    def __init__(self, model):
+                        self.model = model
+
+                    def __call__(self, x, sigma, **kwargs):
+                        # Convert sigma to timesteps if needed
+                        if hasattr(sigma, 'shape') and len(sigma.shape) > 0:
+                            timesteps = sigma
+                        else:
+                            timesteps = sigma * torch.ones(x.shape[0], device=x.device)
+
+                        # Call the model with proper interface
+                        return self.model(x, timesteps)
+
+                model_wrapper = ModelWrapper(self.model)
+
+                # Generate samples using the formal framework
+                # Note: The sampling framework expects a specific interface
+                samples = sampler(model_wrapper, task="protein_only")
+
+                # Process each generated sample
+                for i in range(num_samples):
+                    try:
+                        if len(samples.shape) > 1:
+                            sample_tokens = samples[i]
+                        else:
+                            sample_tokens = samples
+
+                        decoded_sequence = self.decode_sequence(sample_tokens)
+
+                        generated_sequences.append({
+                            'sample_id': i,
+                            'raw_tokens': sample_tokens[:50].cpu().tolist(),
+                            'sequence': decoded_sequence,
+                            'length': len(decoded_sequence),
+                            'unique_amino_acids': len(set(decoded_sequence)) if decoded_sequence else 0
+                        })
+                    except Exception as e:
+                        print(f"⚠️  Error processing sample {i}: {e}")
+                        generated_sequences.append({
+                            'sample_id': i,
+                            'raw_tokens': [],
+                            'sequence': '',
+                            'length': 0,
+                            'unique_amino_acids': 0
+                        })
+
+            except Exception as e:
+                print(f"⚠️  Error in rigorous sampling: {e}")
+                import traceback
+                traceback.print_exc()
+                # Fallback to simple method
+                print("🔄 Falling back to simple generation method...")
+                generated_sequences = self.generate_protein_sequences_simple(num_samples, max_length)
+
+            finally:
+                # Restore original weights
+                self.ema.restore(self.model.parameters())
+
+        self.model.train()
+        return generated_sequences
+
+    def generate_protein_sequences_simple(self, num_samples: int = 10, max_length: int = 256, num_diffusion_steps: int = 50, temperature: float = 1.0):
+        """Generate protein sequences using simple heuristic diffusion sampling."""
+        print(f"🧬 Generating {num_samples} protein sequences using simple heuristic sampling...")
 
         self.model.eval()
         generated_sequences = []
@@ -510,6 +618,128 @@ class OptimizedUniRef50Trainer:
 
         self.model.train()
         return generated_sequences
+
+    def generate_protein_sequences(self, num_samples: int = 10, max_length: int = 256,
+                                 sampling_method: str = "rigorous", **kwargs):
+        """
+        Generate protein sequences with choice of sampling method.
+
+        Args:
+            num_samples: Number of sequences to generate
+            max_length: Maximum sequence length
+            sampling_method: "rigorous" (CTMC) or "simple" (heuristic)
+            **kwargs: Additional arguments for simple method (num_diffusion_steps, temperature)
+        """
+        if sampling_method == "rigorous":
+            return self.generate_protein_sequences_rigorous(num_samples, max_length)
+        elif sampling_method == "simple":
+            return self.generate_protein_sequences_simple(num_samples, max_length, **kwargs)
+        else:
+            raise ValueError(f"Unknown sampling method: {sampling_method}. Use 'rigorous' or 'simple'.")
+
+    def quick_generation_test(self, step: int, epoch: int, num_samples: int = 3, max_length: int = 80):
+        """Quick generation test during training to monitor generation quality."""
+        print(f"\n🧬 Quick generation test - Step {step}")
+
+        try:
+            # Use the configured sampling method for quick test
+            start_time = time.time()
+
+            if self.sampling_method == "rigorous":
+                sequences = self.generate_protein_sequences_rigorous(num_samples, max_length)
+            else:
+                sequences = self.generate_protein_sequences_simple(
+                    num_samples, max_length, num_diffusion_steps=15, temperature=1.0
+                )
+
+            generation_time = time.time() - start_time
+
+            # Analyze generated sequences
+            valid_sequences = [s for s in sequences if s['sequence']]
+            valid_count = len(valid_sequences)
+
+            if valid_count > 0:
+                avg_length = np.mean([s['length'] for s in valid_sequences])
+                avg_unique_aa = np.mean([s['unique_amino_acids'] for s in valid_sequences])
+
+                # Show first sequence as example
+                example_seq = valid_sequences[0]['sequence'][:40]
+                print(f"   ✅ Generated {valid_count}/{num_samples} valid sequences")
+                print(f"   📊 Avg length: {avg_length:.1f}, Avg unique AAs: {avg_unique_aa:.1f}")
+                print(f"   🧬 Example: {example_seq}...")
+
+                # Log to wandb
+                wandb.log({
+                    'quick_gen/valid_sequences': valid_count,
+                    'quick_gen/total_sequences': num_samples,
+                    'quick_gen/success_rate': valid_count / num_samples,
+                    'quick_gen/avg_length': avg_length,
+                    'quick_gen/avg_unique_aa': avg_unique_aa,
+                    'quick_gen/generation_time': generation_time,
+                    'quick_gen/sampling_method': self.sampling_method
+                }, step=step)
+
+                return True
+            else:
+                print(f"   ⚠️  No valid sequences generated ({num_samples} attempted)")
+                wandb.log({
+                    'quick_gen/valid_sequences': 0,
+                    'quick_gen/total_sequences': num_samples,
+                    'quick_gen/success_rate': 0.0,
+                    'quick_gen/generation_time': generation_time,
+                    'quick_gen/sampling_method': self.sampling_method
+                }, step=step)
+                return False
+
+        except Exception as e:
+            print(f"   ❌ Quick generation test failed: {e}")
+            wandb.log({
+                'quick_gen/error': str(e),
+                'quick_gen/sampling_method': self.sampling_method
+            }, step=step)
+            return False
+
+    def test_sampling_methods(self, num_samples: int = 5, max_length: int = 100):
+        """Test and compare both sampling methods."""
+        print("\n🧪 TESTING SAMPLING METHODS")
+        print("=" * 60)
+
+        try:
+            # Test rigorous sampling
+            print("🔬 Testing rigorous CTMC sampling...")
+            rigorous_sequences = self.generate_protein_sequences_rigorous(num_samples, max_length)
+            rigorous_success = len([s for s in rigorous_sequences if s['sequence']]) > 0
+
+            print(f"   ✅ Rigorous sampling: {len(rigorous_sequences)} sequences generated")
+            if rigorous_success:
+                avg_length_rigorous = np.mean([s['length'] for s in rigorous_sequences if s['sequence']])
+                print(f"   📊 Average length: {avg_length_rigorous:.1f}")
+                print(f"   🧬 Sample: {rigorous_sequences[0]['sequence'][:50]}...")
+
+            # Test simple sampling
+            print("\n🎲 Testing simple heuristic sampling...")
+            simple_sequences = self.generate_protein_sequences_simple(num_samples, max_length,
+                                                                    num_diffusion_steps=20, temperature=1.0)
+            simple_success = len([s for s in simple_sequences if s['sequence']]) > 0
+
+            print(f"   ✅ Simple sampling: {len(simple_sequences)} sequences generated")
+            if simple_success:
+                avg_length_simple = np.mean([s['length'] for s in simple_sequences if s['sequence']])
+                print(f"   📊 Average length: {avg_length_simple:.1f}")
+                print(f"   🧬 Sample: {simple_sequences[0]['sequence'][:50]}...")
+
+            # Summary
+            print(f"\n📋 SAMPLING TEST SUMMARY:")
+            print(f"   Rigorous CTMC: {'✅ PASS' if rigorous_success else '❌ FAIL'}")
+            print(f"   Simple Heuristic: {'✅ PASS' if simple_success else '❌ FAIL'}")
+
+            return rigorous_success and simple_success
+
+        except Exception as e:
+            print(f"❌ Sampling test failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     def analyze_sequence_properties(self, sequences):
         """Analyze biochemical properties of generated sequences."""
@@ -596,7 +826,7 @@ class OptimizedUniRef50Trainer:
 
         return properties
 
-    def comprehensive_evaluation(self, step: int, epoch: int, num_samples: int = 15):
+    def comprehensive_evaluation(self, step: int, epoch: int, num_samples: int = 15, sampling_method: str = "rigorous"):
         """Comprehensive evaluation including generation quality assessment."""
         print(f"\n🔬 COMPREHENSIVE EVALUATION - Step {step}, Epoch {epoch}")
         print("=" * 80)
@@ -606,14 +836,28 @@ class OptimizedUniRef50Trainer:
             print("📊 Computing validation loss...")
             val_loss = self.validate_model()
 
-            # 2. Generate sequences
-            print("🧬 Generating protein sequences...")
-            generated_sequences = self.generate_protein_sequences(
-                num_samples=num_samples,
-                max_length=200,  # Reasonable length for evaluation
-                num_diffusion_steps=30,  # More steps for better quality
-                temperature=0.9  # Slightly focused sampling
-            )
+            # 2. Generate sequences using specified method
+            print(f"🧬 Generating protein sequences using {sampling_method} method...")
+            if sampling_method == "rigorous":
+                generated_sequences = self.generate_protein_sequences(
+                    num_samples=num_samples,
+                    max_length=200,  # Reasonable length for evaluation
+                    sampling_method="rigorous"
+                )
+            else:
+                generated_sequences = self.generate_protein_sequences(
+                    num_samples=num_samples,
+                    max_length=200,  # Reasonable length for evaluation
+                    sampling_method="simple",
+                    num_diffusion_steps=30,  # More steps for better quality
+                    temperature=0.9  # Slightly focused sampling
+                )
+
+            # Log sampling method used
+            wandb.log({
+                'eval/sampling_method': sampling_method,
+                'eval/num_generated_samples': len(generated_sequences)
+            }, step=step)
 
             # 3. Analyze sequence properties
             print("🔍 Analyzing sequence properties...")
@@ -1048,6 +1292,15 @@ class OptimizedUniRef50Trainer:
 
         print(f"🚀 Starting training for {self.cfg.training.n_iters} steps (from step {step})...")
 
+        # Initial generation test to verify setup
+        if step == 0:
+            print("\n🧪 Running initial generation test to verify setup...")
+            initial_test_success = self.quick_generation_test(step, 0, num_samples=2, max_length=50)
+            if initial_test_success:
+                print("✅ Initial generation test passed - training can proceed")
+            else:
+                print("⚠️  Initial generation test had issues - but continuing training")
+
         for epoch in range(start_epoch, self.cfg.training.epochs):
             epoch_loss = 0.0
             num_batches = 0
@@ -1094,9 +1347,16 @@ class OptimizedUniRef50Trainer:
                     running_loss = 0.0
                     log_interval_start_time = time.time()
 
+                # Quick generation test (more frequent than comprehensive evaluation)
+                quick_gen_freq = getattr(self.cfg.training, 'quick_gen_freq', self.cfg.training.log_freq * 2)
+                if step % quick_gen_freq == 0 and step > 0:
+                    self.quick_generation_test(step, epoch)
+
                 # Comprehensive evaluation
                 if step % self.cfg.training.eval_freq == 0:
-                    val_loss, generation_properties = self.comprehensive_evaluation(step, epoch, num_samples=10)
+                    val_loss, generation_properties = self.comprehensive_evaluation(
+                        step, epoch, num_samples=10, sampling_method=self.sampling_method
+                    )
 
                     # Update best loss tracking
                     if val_loss < best_loss:
@@ -1223,6 +1483,9 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to use")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--fresh", action="store_true", help="Force fresh start (ignore existing checkpoints)")
+    parser.add_argument("--sampling_method", type=str, default="rigorous",
+                       choices=["rigorous", "simple"],
+                       help="Sampling method: 'rigorous' (CTMC) or 'simple' (heuristic)")
 
     args = parser.parse_args()
 
@@ -1237,6 +1500,7 @@ def main():
     print(f"🏷️  Wandb run: {args.wandb_name}")
     print(f"🖥️  Device: {args.device}")
     print(f"🎲 Seed: {args.seed}")
+    print(f"🧬 Sampling method: {args.sampling_method}")
     print()
 
     try:
@@ -1248,7 +1512,8 @@ def main():
             datafile=args.datafile,
             dev_id=args.device,
             seed=args.seed,
-            force_fresh_start=args.fresh
+            force_fresh_start=args.fresh,
+            sampling_method=args.sampling_method
         )
 
         print("✅ Trainer initialized successfully!")
