@@ -494,15 +494,33 @@ class OptimizedUniRef50Trainer:
                     def __init__(self, model):
                         self.model = model
 
-                    def __call__(self, x, sigma, **kwargs):
-                        # Convert sigma to timesteps if needed
-                        if hasattr(sigma, 'shape') and len(sigma.shape) > 0:
-                            timesteps = sigma
-                        else:
-                            timesteps = sigma * torch.ones(x.shape[0], device=x.device)
+                    def __call__(self, x=None, sigma=None, **kwargs):
+                        # Handle different calling conventions from the sampling framework
+                        if 'protein_indices' in kwargs and 'timesteps' in kwargs:
+                            # Called from sampling framework with keyword arguments
+                            # Extract the relevant arguments for UniRef50 model
+                            protein_indices = kwargs['protein_indices']
+                            timesteps = kwargs['timesteps']
+                            mode = kwargs.get('mode', 'protein_only')
 
-                        # Call the model with proper interface
-                        return self.model(x, timesteps)
+                            # UniRef50 model expects (indices, sigma) format
+                            # Use protein_indices as the main input for protein_only mode
+                            if mode == 'protein_only':
+                                return self.model(protein_indices, timesteps)
+                            else:
+                                raise ValueError(f"UniRef50 model only supports protein_only mode, got {mode}")
+
+                        elif x is not None and sigma is not None:
+                            # Called with positional arguments (legacy interface)
+                            # Convert sigma to timesteps if needed
+                            if hasattr(sigma, 'shape') and len(sigma.shape) > 0:
+                                timesteps = sigma
+                            else:
+                                timesteps = sigma * torch.ones(x.shape[0], device=x.device)
+                            # Call the model with proper interface
+                            return self.model(x, timesteps)
+                        else:
+                            raise ValueError(f"ModelWrapper called with invalid arguments. Got x={x}, sigma={sigma}, kwargs={list(kwargs.keys())}")
 
                     def eval(self):
                         """Set model to evaluation mode."""
