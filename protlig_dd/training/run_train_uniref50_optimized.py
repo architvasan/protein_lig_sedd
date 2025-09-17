@@ -786,22 +786,17 @@ class OptimizedUniRef50Trainer:
         if hasattr(self.cfg, 'curriculum') and self.cfg.curriculum.enabled:
             perturbed_batch = self.graph.sample_transition_curriculum(
                 batch,
-                sigma[:, None],
+                sigma,  # Fixed: removed [:, None] as graph functions handle broadcasting internally
                 self.state['step'],
                 preschool_time=self.cfg.curriculum.preschool_time,
                 curriculum_type=getattr(self.cfg.curriculum, 'difficulty_ramp', 'exponential')
             )
         else:
-            perturbed_batch = self.graph.sample_transition(batch, sigma[:, None])
+            perturbed_batch = self.graph.sample_transition(batch, sigma)  # Fixed: removed [:, None]
 
-        # Ensure perturbed_batch is 2D: [batch_size, sequence_length]
+        # Validate perturbed_batch is 2D: [batch_size, sequence_length]
         if perturbed_batch.dim() != 2:
-            print(f"WARNING: perturbed_batch has {perturbed_batch.dim()}D shape {perturbed_batch.shape}")
-            if perturbed_batch.dim() > 2:
-                perturbed_batch = perturbed_batch.view(perturbed_batch.shape[0], -1)
-                print(f"Reshaped perturbed_batch to: {perturbed_batch.shape}")
-            else:
-                raise ValueError(f"perturbed_batch must be at least 2D, got {perturbed_batch.dim()}D with shape {perturbed_batch.shape}")
+            raise ValueError(f"perturbed_batch must be 2D [batch_size, seq_len], got {perturbed_batch.dim()}D with shape {perturbed_batch.shape}. This indicates an issue in the graph operations.")
 
         # Forward pass with device-aware autocast and shape validation
         try:

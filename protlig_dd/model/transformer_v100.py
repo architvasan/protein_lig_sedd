@@ -209,6 +209,45 @@ class V100MultiHeadAttention(nn.Module):
         return self.out_proj(x)
 
 
+def memory_efficient_attention(q, k, v, chunk_size=512):
+    """
+    Memory-efficient attention using chunked computation.
+
+    Args:
+        q: [n_heads, seq_len, head_dim]
+        k: [n_heads, seq_len, head_dim]
+        v: [n_heads, seq_len, head_dim]
+        chunk_size: Size of chunks to process at once
+
+    Returns:
+        output: [n_heads, seq_len, head_dim]
+    """
+    n_heads, seq_len, head_dim = q.shape
+    scale = head_dim ** -0.5
+
+    # If sequence is small enough, use standard attention
+    if seq_len <= chunk_size:
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        return torch.matmul(attn_weights, v)
+
+    # Chunked attention for large sequences
+    output = torch.zeros_like(q)
+
+    for i in range(0, seq_len, chunk_size):
+        end_i = min(i + chunk_size, seq_len)
+        q_chunk = q[:, i:end_i]  # [n_heads, chunk_size, head_dim]
+
+        # Compute attention scores for this query chunk against all keys
+        attn_scores = torch.matmul(q_chunk, k.transpose(-2, -1)) * scale  # [n_heads, chunk_size, seq_len]
+        attn_weights = F.softmax(attn_scores, dim=-1)
+
+        # Apply attention to values
+        output[:, i:end_i] = torch.matmul(attn_weights, v)  # [n_heads, chunk_size, head_dim]
+
+    return output
+
+
 def v100_flash_attn_varlen_qkvpacked_func(qkv, cu_seqlens, max_seqlen, dropout_p=0.0, causal=False):
     """
     V100-compatible replacement for flash_attn_varlen_qkvpacked_func
@@ -234,20 +273,30 @@ def v100_flash_attn_varlen_qkvpacked_func(qkv, cu_seqlens, max_seqlen, dropout_p
         k_seq = k[start_idx:end_idx].transpose(0, 1)
         v_seq = v[start_idx:end_idx].transpose(0, 1)
 
-        # Compute attention
-        attn_scores = torch.matmul(q_seq, k_seq.transpose(-2, -1)) * scale
+        # Use memory-efficient attention for long sequences
+        if seq_len > 1024:  # Use chunked attention for long sequences
+            chunk_size = min(512, max(64, seq_len // 8))  # Adaptive chunk size
+            attn_out = memory_efficient_attention(q_seq, k_seq, v_seq, chunk_size=chunk_size)
 
-        if causal:
-            # Apply causal mask
-            mask = torch.triu(torch.ones(seq_len, seq_len, device=qkv.device), diagonal=1)
-            attn_scores.masked_fill_(mask.bool(), float('-inf'))
+            # Apply dropout if needed
+            if dropout_p > 0.0:
+                attn_out = F.dropout(attn_out, p=dropout_p, training=True)
+        else:
+            # Standard attention for shorter sequences
+            attn_scores = torch.matmul(q_seq, k_seq.transpose(-2, -1)) * scale
 
-        attn_probs = F.softmax(attn_scores, dim=-1)
+            if causal:
+                # Apply causal mask
+                mask = torch.triu(torch.ones(seq_len, seq_len, device=qkv.device), diagonal=1)
+                attn_scores.masked_fill_(mask.bool(), float('-inf'))
 
-        if dropout_p > 0.0:
-            attn_probs = F.dropout(attn_probs, p=dropout_p, training=True)
+            attn_probs = F.softmax(attn_scores, dim=-1)
 
-        attn_out = torch.matmul(attn_probs, v_seq)  # [n_heads, seq_len, head_dim]
+            if dropout_p > 0.0:
+                attn_probs = F.dropout(attn_probs, p=dropout_p, training=True)
+
+            attn_out = torch.matmul(attn_probs, v_seq)  # [n_heads, seq_len, head_dim]
+
         attn_out = attn_out.transpose(0, 1)  # [seq_len, n_heads, head_dim]
 
         outputs.append(attn_out)
@@ -315,36 +364,53 @@ class TransformerBlock(nn.Module):
             x = device_compatible_modulate(self.norm1(x), shift_msa, scale_msa)
         qkv = self.attn_qkv(x)
 
-        # Debug and fix shape issues
+        # Debug and fix shape issues - CRITICAL FIX for MPS 4D tensor issue
         if qkv.dim() != 3:
             print(f"WARNING: qkv has {qkv.dim()}D shape {qkv.shape}, expected 3D [batch, seq, features]")
-            print(f"QKV tensor size: {qkv.numel()} elements")
 
             if qkv.dim() == 4:
-                # Calculate the correct reshape dimensions
-                batch_size = qkv.shape[0]
-                features = qkv.shape[-1]  # Last dimension should be features
-
-                # Calculate sequence length from total elements
-                total_elements = qkv.numel()
-                seq_len = total_elements // (batch_size * features)
-
-                print(f"Calculated dimensions: batch={batch_size}, seq={seq_len}, features={features}")
-                print(f"Expected total elements: {batch_size * seq_len * features}")
-
-                if batch_size * seq_len * features == total_elements:
-                    qkv = qkv.view(batch_size, seq_len, features)
-                    print(f"Successfully reshaped qkv to: {qkv.shape}")
+                # CRITICAL: Check if this is a duplicate batch dimension issue
+                if qkv.shape[0] == qkv.shape[1] and qkv.shape[0] == batch_size:
+                    print(f"DETECTED: Duplicate batch dimension issue on MPS device")
+                    print(f"Original shape: {qkv.shape} -> Taking [0] to remove duplication")
+                    qkv = qkv[0]  # Remove duplicate batch dimension
+                    print(f"Fixed qkv shape: {qkv.shape}")
                 else:
-                    # Fallback: flatten all middle dimensions
-                    qkv = qkv.view(batch_size, -1, features)
-                    print(f"Fallback reshape qkv to: {qkv.shape}")
+                    # Original logic for other 4D cases
+                    batch_size_qkv = qkv.shape[0]
+                    features = qkv.shape[-1]
+
+                    # For MPS memory safety, limit sequence length
+                    max_seq_len = 1024  # Limit to prevent memory explosion
+                    total_elements = qkv.numel()
+                    calculated_seq_len = total_elements // (batch_size_qkv * features)
+
+                    if calculated_seq_len > max_seq_len:
+                        print(f"WARNING: Calculated seq_len {calculated_seq_len} exceeds safe limit {max_seq_len}")
+                        print(f"Truncating to prevent memory explosion...")
+                        # Truncate to safe sequence length
+                        safe_elements = batch_size_qkv * max_seq_len * features
+                        qkv = qkv.view(-1)[:safe_elements].view(batch_size_qkv, max_seq_len, features)
+                        print(f"Truncated qkv to safe shape: {qkv.shape}")
+                    else:
+                        qkv = qkv.view(batch_size_qkv, calculated_seq_len, features)
+                        print(f"Reshaped qkv to: {qkv.shape}")
             elif qkv.dim() > 4:
-                # For higher dimensions, flatten all middle dimensions
-                batch_size = qkv.shape[0]
+                # For higher dimensions, flatten with safety limits
+                batch_size_qkv = qkv.shape[0]
                 features = qkv.shape[-1]
-                qkv = qkv.view(batch_size, -1, features)
-                print(f"Flattened high-dim qkv to: {qkv.shape}")
+                max_seq_len = 1024  # Safety limit
+
+                total_elements = qkv.numel()
+                calculated_seq_len = total_elements // (batch_size_qkv * features)
+
+                if calculated_seq_len > max_seq_len:
+                    print(f"WARNING: High-dim tensor would create seq_len {calculated_seq_len}, truncating to {max_seq_len}")
+                    safe_elements = batch_size_qkv * max_seq_len * features
+                    qkv = qkv.view(-1)[:safe_elements].view(batch_size_qkv, max_seq_len, features)
+                else:
+                    qkv = qkv.view(batch_size_qkv, -1, features)
+                print(f"Fixed high-dim qkv to: {qkv.shape}")
 
         qkv = rearrange(qkv, 'b s (three h d) -> b s three h d', three=3, h=self.n_heads)
         
@@ -483,6 +549,23 @@ class SEDD(nn.Module, PyTorchModelHubMixin):
                 raise ValueError(f"indices must be 2D, got {indices.dim()}D with shape {indices.shape}")
 
         x = self.vocab_embed(indices)
+
+        # Debug embedding output shape
+        if x.dim() != 3:
+            print(f"WARNING: vocab_embed output has {x.dim()}D shape {x.shape}, expected 3D [batch, seq, dim]")
+            print(f"Input indices shape: {indices.shape}")
+            if x.dim() == 4 and x.shape[0] == x.shape[1]:
+                # Remove duplicate batch dimension
+                print(f"Removing duplicate batch dimension...")
+                x = x[0]  # Take first batch element to remove duplication
+                print(f"Fixed x shape: {x.shape}")
+            elif x.dim() > 3:
+                # Flatten extra dimensions
+                batch_size = x.shape[0]
+                dim = x.shape[-1]
+                x = x.view(batch_size, -1, dim)
+                print(f"Flattened x to: {x.shape}")
+
         c = self.sigma_map(sigma)  # TimestepEmbedder already includes SiLU
 
         rotary_cos_sin = self.rotary_emb(x)

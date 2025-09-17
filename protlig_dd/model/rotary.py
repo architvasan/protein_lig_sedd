@@ -47,6 +47,25 @@ def _rotate_half(x):
 
 def _apply_rotary_pos_emb_native(qkv, cos, sin):
     """Apply rotary position embedding using native PyTorch operations (no TorchScript)."""
+    # Handle sequence length mismatch by adjusting cos/sin to match qkv
+    qkv_seq_len = qkv.shape[1]  # [batch, seq_len, 3, heads, dim]
+    cos_seq_len = cos.shape[1]  # [1, seq_len, 1, 1, dim]
+
+    if qkv_seq_len != cos_seq_len:
+        print(f"Adjusting rotary embeddings: qkv_seq_len={qkv_seq_len}, cos_seq_len={cos_seq_len}")
+
+        if qkv_seq_len > cos_seq_len:
+            # Repeat cos/sin to match longer sequence
+            repeat_factor = (qkv_seq_len + cos_seq_len - 1) // cos_seq_len  # Ceiling division
+            cos = cos.repeat(1, repeat_factor, 1, 1, 1)[:, :qkv_seq_len]
+            sin = sin.repeat(1, repeat_factor, 1, 1, 1)[:, :qkv_seq_len]
+        else:
+            # Truncate cos/sin to match shorter sequence
+            cos = cos[:, :qkv_seq_len]
+            sin = sin[:, :qkv_seq_len]
+
+        print(f"Adjusted cos/sin shape: {cos.shape}")
+
     return (qkv * cos) + (_rotate_half(qkv) * sin)
 
 

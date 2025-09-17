@@ -238,8 +238,8 @@ class Absorbing(Graph):
         Improved curriculum learning with multiple strategies.
 
         Args:
-            i: Input tokens
-            sigma: Noise level
+            i: Input tokens [batch_size, seq_len]
+            sigma: Noise level [batch_size]
             training_step: Current training step
             preschool_time: Steps to reach full difficulty
             curriculum_type: "linear", "exponential", or "cosine"
@@ -262,14 +262,16 @@ class Absorbing(Graph):
         min_difficulty = 0.1  # Always maintain some noise
         adjusted_sigma = sigma * (min_difficulty + curriculum_factor * (1.0 - min_difficulty))
 
-        move_chance = 1 - (-adjusted_sigma).exp()
-        move_indices = torch.rand(*i.shape, device=i.device) < move_chance
+        # Ensure proper broadcasting: sigma [batch_size] -> [batch_size, 1] for broadcasting with i [batch_size, seq_len]
+        move_chance = 1 - (-adjusted_sigma.unsqueeze(-1)).exp()  # [batch_size, 1]
+        move_indices = torch.rand(*i.shape, device=i.device) < move_chance  # [batch_size, seq_len]
         i_pert = torch.where(move_indices, self.dim - 1, i)
         return i_pert
 
     def sample_transition(self, i, sigma):
-        move_chance = 1 - (-sigma).exp()
-        move_indices = torch.rand(*i.shape, device=i.device) < move_chance
+        # Ensure proper broadcasting: sigma [batch_size] -> [batch_size, 1] for broadcasting with i [batch_size, seq_len]
+        move_chance = 1 - (-sigma.unsqueeze(-1)).exp()  # [batch_size, 1]
+        move_indices = torch.rand(*i.shape, device=i.device) < move_chance  # [batch_size, seq_len]
         i_pert = torch.where(move_indices, self.dim - 1, i)
         return i_pert
     
