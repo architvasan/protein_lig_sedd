@@ -504,6 +504,34 @@ class OptimizedUniRef50Trainer:
                         # Call the model with proper interface
                         return self.model(x, timesteps)
 
+                    def eval(self):
+                        """Set model to evaluation mode."""
+                        self.model.eval()
+                        return self
+
+                    def train(self, mode=True):
+                        """Set model to training mode."""
+                        self.model.train(mode)
+                        return self
+
+                    def parameters(self):
+                        """Return model parameters."""
+                        return self.model.parameters()
+
+                    def state_dict(self):
+                        """Return model state dict."""
+                        return self.model.state_dict()
+
+                    def to(self, device):
+                        """Move model to device."""
+                        self.model.to(device)
+                        return self
+
+                    @property
+                    def device(self):
+                        """Get model device."""
+                        return next(self.model.parameters()).device
+
                 model_wrapper = ModelWrapper(self.model)
 
                 # Generate samples using the formal framework
