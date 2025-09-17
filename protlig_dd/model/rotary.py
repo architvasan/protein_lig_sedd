@@ -39,7 +39,19 @@ def _apply_rotary_pos_emb_torchscript(qkv, cos, sin):
     return (qkv * cos) + (rotate_half(qkv) * sin)
 
 
+def _rotate_half(x):
+    """Rotate half the hidden dims of the input."""
+    x1, x2 = x[..., : x.shape[-1] // 2], x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def _apply_rotary_pos_emb_native(qkv, cos, sin):
+    """Apply rotary position embedding using native PyTorch operations (no TorchScript)."""
+    return (qkv * cos) + (_rotate_half(qkv) * sin)
+
+
 def apply_rotary_pos_emb(qkv, cos, sin):
+    """Apply rotary position embedding with fallback to native implementation."""
     try:
         import flash_attn.layers.rotary
         cos = cos[0,:,0,0,:cos.shape[-1]//2]
@@ -47,8 +59,13 @@ def apply_rotary_pos_emb(qkv, cos, sin):
         return flash_attn.layers.rotary.apply_rotary_emb_qkv_(
             qkv, cos, sin
         )
-    except:
-        return _apply_rotary_pos_emb_torchscript(qkv, cos, sin)
+    except ImportError:
+        # Flash attention not available, use native implementation
+        return _apply_rotary_pos_emb_native(qkv, cos, sin)
+    except Exception as e:
+        # Any other error (including TorchScript device issues), use native implementation
+        print(f"Flash attention rotary failed ({e}), using native implementation")
+        return _apply_rotary_pos_emb_native(qkv, cos, sin)
 
 if False:
     class _Rotary(torch.nn.Module):

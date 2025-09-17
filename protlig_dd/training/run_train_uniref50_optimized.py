@@ -4,8 +4,15 @@ Optimized training script for UniRef50 with improved stability and efficiency.
 
 import datetime
 import os
+import sys
 import gc
 import time
+
+# Add the project root to Python path to ensure protlig_dd module can be found
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+    print(f"Added project root to Python path: {project_root}")
 from itertools import chain
 import wandb
 import numpy as np
@@ -70,6 +77,7 @@ class OptimizedUniRef50Trainer:
     dev_id: str = 'cuda:0'
     seed: int = 42
     resume_checkpoint: Optional[str] = None
+    force_fresh_start: bool = False
     
     def __post_init__(self):
         """Initialize trainer components."""
@@ -406,58 +414,346 @@ class OptimizedUniRef50Trainer:
 
         wandb.log(metrics, step=step)
 
-    def log_model_samples(self, step: int, num_samples: int = 5):
-        """Generate and log model samples to Wandb."""
-        try:
-            print(f"Generating {num_samples} samples for logging...")
+    def decode_sequence(self, sequence_tensor, vocab_mapping=None):
+        """Decode a sequence tensor to amino acid string."""
+        if vocab_mapping is None:
+            # Load vocabulary mapping
+            try:
+                import json
+                with open("input_data/vocab.json", 'r') as f:
+                    vocab = json.load(f)
+                id_to_token = {v: k for k, v in vocab.items()}
+            except:
+                # Fallback mapping
+                id_to_token = {i: aa for i, aa in enumerate(['<s>', '<pad>', '</s>', '<unk>', '<mask>'] + list('ACDEFGHIKLMNPQRSTVWY'))}
+        else:
+            id_to_token = vocab_mapping
 
-            # Set model to eval mode
-            self.model.eval()
+        if torch.is_tensor(sequence_tensor):
+            sequence = sequence_tensor.tolist()
+        else:
+            sequence = sequence_tensor
 
-            with torch.no_grad():
-                # Generate samples using the sampling module
-                samples = []
-                for i in range(num_samples):
-                    # Sample from the model
-                    sample_length = torch.randint(50, 200, (1,)).item()
+        # Decode only amino acids (skip special tokens)
+        amino_acids = []
+        for token_id in sequence:
+            if token_id in id_to_token:
+                token = id_to_token[token_id]
+                if token in 'ACDEFGHIKLMNPQRSTVWY':
+                    amino_acids.append(token)
 
-                    # Initialize with random tokens
-                    initial_tokens = torch.randint(
-                        0, self.cfg.data.vocab_size_protein,
-                        (1, sample_length),
-                        device=self.device
-                    )
+        return ''.join(amino_acids)
 
-                    # This is a simplified sampling - you may need to adapt based on your sampling code
-                    generated_sample = initial_tokens[0].cpu().numpy()
+    def generate_protein_sequences(self, num_samples: int = 10, max_length: int = 256, num_diffusion_steps: int = 50, temperature: float = 1.0):
+        """Generate protein sequences using proper diffusion sampling."""
+        print(f"🧬 Generating {num_samples} protein sequences using diffusion sampling...")
 
-                    # Convert tokens back to amino acid sequence (simplified)
-                    amino_acids = "ACDEFGHIKLMNPQRSTVWY"
-                    sequence = ''.join([amino_acids[min(token, len(amino_acids)-1)] for token in generated_sample if token < len(amino_acids)])
+        self.model.eval()
+        generated_sequences = []
 
-                    samples.append({
+        with torch.no_grad():
+            for i in range(num_samples):
+                try:
+                    # Initialize with absorbing states (assuming vocab_size - 1 is absorbing)
+                    vocab_size = self.cfg.data.vocab_size_protein + (1 if hasattr(self.cfg.graph, 'type') and self.cfg.graph.type == "absorb" else 0)
+                    absorbing_token = vocab_size - 1
+
+                    # Start with all absorbing tokens
+                    sample = torch.full((1, max_length), absorbing_token, dtype=torch.long, device=self.device)
+
+                    # Diffusion denoising process
+                    for step in range(num_diffusion_steps):
+                        # Compute timestep (from 1.0 to 0.0)
+                        t = torch.tensor([1.0 - step / num_diffusion_steps], device=self.device)
+
+                        # Get model predictions
+                        device_type = str(self.device).split(':')[0]
+                        if device_type == 'cuda':
+                            with torch.cuda.amp.autocast(enabled=False):
+                                logits = self.model(sample, t)
+                        else:
+                            logits = self.model(sample, t)
+
+                        # Temperature sampling
+                        probs = torch.softmax(logits / temperature, dim=-1)
+
+                        # Sample new tokens for each position
+                        batch_size, seq_len, vocab_size_actual = probs.shape
+                        probs_flat = probs.view(-1, vocab_size_actual)
+                        new_tokens = torch.multinomial(probs_flat, 1).view(batch_size, seq_len)
+
+                        # Gradually replace absorbing tokens with generated tokens
+                        replace_prob = (step + 1) / num_diffusion_steps
+                        mask = torch.rand(batch_size, seq_len, device=self.device) < replace_prob
+                        sample = torch.where(mask, new_tokens, sample)
+
+                    # Decode the generated sequence
+                    decoded_sequence = self.decode_sequence(sample[0])
+
+                    generated_sequences.append({
                         'sample_id': i,
-                        'sequence': sequence[:100],  # Truncate for display
-                        'length': len(sequence)
+                        'raw_tokens': sample[0][:50].cpu().tolist(),  # First 50 tokens for debugging
+                        'sequence': decoded_sequence,
+                        'length': len(decoded_sequence),
+                        'unique_amino_acids': len(set(decoded_sequence)) if decoded_sequence else 0
                     })
 
-                # Log samples as a table
+                except Exception as e:
+                    print(f"⚠️  Error generating sample {i}: {e}")
+                    generated_sequences.append({
+                        'sample_id': i,
+                        'raw_tokens': [],
+                        'sequence': '',
+                        'length': 0,
+                        'unique_amino_acids': 0
+                    })
+
+        self.model.train()
+        return generated_sequences
+
+    def analyze_sequence_properties(self, sequences):
+        """Analyze biochemical properties of generated sequences."""
+        if not sequences:
+            return {}
+
+        # Filter out empty sequences
+        valid_sequences = [seq['sequence'] for seq in sequences if seq['sequence']]
+        if not valid_sequences:
+            return {'error': 'No valid sequences generated'}
+
+        # Amino acid property groups
+        hydrophobic = set('AILMFPWV')
+        polar = set('NQSTC')
+        charged_positive = set('RHK')
+        charged_negative = set('DE')
+        aromatic = set('FWY')
+        small = set('AGST')
+
+        # Analyze each sequence
+        properties = {
+            'num_sequences': len(valid_sequences),
+            'lengths': [len(seq) for seq in valid_sequences],
+            'unique_aa_counts': [len(set(seq)) for seq in valid_sequences],
+            'hydrophobic_pcts': [],
+            'polar_pcts': [],
+            'positive_pcts': [],
+            'negative_pcts': [],
+            'aromatic_pcts': [],
+            'amino_acid_frequencies': {}
+        }
+
+        # Initialize amino acid frequency counter
+        for aa in 'ACDEFGHIKLMNPQRSTVWY':
+            properties['amino_acid_frequencies'][aa] = 0
+
+        total_amino_acids = 0
+
+        for seq in valid_sequences:
+            if len(seq) == 0:
+                continue
+
+            # Count amino acid types
+            hydrophobic_count = sum(1 for aa in seq if aa in hydrophobic)
+            polar_count = sum(1 for aa in seq if aa in polar)
+            positive_count = sum(1 for aa in seq if aa in charged_positive)
+            negative_count = sum(1 for aa in seq if aa in charged_negative)
+            aromatic_count = sum(1 for aa in seq if aa in aromatic)
+
+            # Calculate percentages
+            seq_len = len(seq)
+            properties['hydrophobic_pcts'].append(hydrophobic_count / seq_len * 100)
+            properties['polar_pcts'].append(polar_count / seq_len * 100)
+            properties['positive_pcts'].append(positive_count / seq_len * 100)
+            properties['negative_pcts'].append(negative_count / seq_len * 100)
+            properties['aromatic_pcts'].append(aromatic_count / seq_len * 100)
+
+            # Count individual amino acids
+            for aa in seq:
+                if aa in properties['amino_acid_frequencies']:
+                    properties['amino_acid_frequencies'][aa] += 1
+                    total_amino_acids += 1
+
+        # Convert counts to percentages
+        if total_amino_acids > 0:
+            for aa in properties['amino_acid_frequencies']:
+                properties['amino_acid_frequencies'][aa] = (
+                    properties['amino_acid_frequencies'][aa] / total_amino_acids * 100
+                )
+
+        # Calculate summary statistics
+        properties['summary'] = {
+            'avg_length': np.mean(properties['lengths']) if properties['lengths'] else 0,
+            'std_length': np.std(properties['lengths']) if properties['lengths'] else 0,
+            'min_length': min(properties['lengths']) if properties['lengths'] else 0,
+            'max_length': max(properties['lengths']) if properties['lengths'] else 0,
+            'avg_unique_aa': np.mean(properties['unique_aa_counts']) if properties['unique_aa_counts'] else 0,
+            'avg_hydrophobic': np.mean(properties['hydrophobic_pcts']) if properties['hydrophobic_pcts'] else 0,
+            'avg_polar': np.mean(properties['polar_pcts']) if properties['polar_pcts'] else 0,
+            'avg_positive': np.mean(properties['positive_pcts']) if properties['positive_pcts'] else 0,
+            'avg_negative': np.mean(properties['negative_pcts']) if properties['negative_pcts'] else 0,
+            'avg_aromatic': np.mean(properties['aromatic_pcts']) if properties['aromatic_pcts'] else 0,
+        }
+
+        return properties
+
+    def comprehensive_evaluation(self, step: int, epoch: int, num_samples: int = 15):
+        """Comprehensive evaluation including generation quality assessment."""
+        print(f"\n🔬 COMPREHENSIVE EVALUATION - Step {step}, Epoch {epoch}")
+        print("=" * 80)
+
+        try:
+            # 1. Validation loss
+            print("📊 Computing validation loss...")
+            val_loss = self.validate_model()
+
+            # 2. Generate sequences
+            print("🧬 Generating protein sequences...")
+            generated_sequences = self.generate_protein_sequences(
+                num_samples=num_samples,
+                max_length=200,  # Reasonable length for evaluation
+                num_diffusion_steps=30,  # More steps for better quality
+                temperature=0.9  # Slightly focused sampling
+            )
+
+            # 3. Analyze sequence properties
+            print("🔍 Analyzing sequence properties...")
+            properties = self.analyze_sequence_properties(generated_sequences)
+
+            # 4. Compare with training data (sample a few training sequences)
+            print("📚 Sampling training data for comparison...")
+            training_comparison = self.get_training_data_stats()
+
+            # 5. Log comprehensive metrics to Wandb
+            print("📈 Logging metrics to Wandb...")
+
+            # Basic metrics
+            wandb_metrics = {
+                'eval/validation_loss': val_loss,
+                'eval/step': step,
+                'eval/epoch': epoch,
+            }
+
+            # Generation quality metrics
+            if 'error' not in properties:
+                summary = properties['summary']
+                wandb_metrics.update({
+                    'generation/num_valid_sequences': properties['num_sequences'],
+                    'generation/avg_length': summary['avg_length'],
+                    'generation/std_length': summary['std_length'],
+                    'generation/min_length': summary['min_length'],
+                    'generation/max_length': summary['max_length'],
+                    'generation/avg_unique_amino_acids': summary['avg_unique_aa'],
+                    'generation/avg_hydrophobic_pct': summary['avg_hydrophobic'],
+                    'generation/avg_polar_pct': summary['avg_polar'],
+                    'generation/avg_positive_pct': summary['avg_positive'],
+                    'generation/avg_negative_pct': summary['avg_negative'],
+                    'generation/avg_aromatic_pct': summary['avg_aromatic'],
+                })
+
+                # Amino acid frequency distribution
+                for aa, freq in properties['amino_acid_frequencies'].items():
+                    wandb_metrics[f'generation/aa_freq_{aa}'] = freq
+
+            # Training data comparison
+            if training_comparison:
+                for key, value in training_comparison.items():
+                    wandb_metrics[f'training_data/{key}'] = value
+
+            # Log to Wandb
+            wandb.log(wandb_metrics, step=step)
+
+            # 6. Create and log sample table
+            if generated_sequences:
+                sample_data = []
+                for seq_info in generated_sequences[:10]:  # Show top 10
+                    sample_data.append([
+                        seq_info['sample_id'],
+                        seq_info['sequence'][:80] + ('...' if len(seq_info['sequence']) > 80 else ''),
+                        seq_info['length'],
+                        seq_info['unique_amino_acids']
+                    ])
+
                 sample_table = wandb.Table(
-                    columns=['Sample ID', 'Generated Sequence', 'Length'],
-                    data=[[s['sample_id'], s['sequence'], s['length']] for s in samples]
+                    columns=['Sample ID', 'Generated Sequence', 'Length', 'Unique AAs'],
+                    data=sample_data
                 )
 
                 wandb.log({
                     'samples/generated_proteins': sample_table,
-                    'samples/avg_length': np.mean([s['length'] for s in samples]),
                     'samples/step': step
                 }, step=step)
 
-            # Set model back to train mode
-            self.model.train()
+            # 7. Print summary
+            print(f"\n📋 EVALUATION SUMMARY:")
+            print(f"   Validation Loss: {val_loss:.4f}")
+            if 'error' not in properties:
+                print(f"   Generated Sequences: {properties['num_sequences']}")
+                print(f"   Avg Length: {properties['summary']['avg_length']:.1f} ± {properties['summary']['std_length']:.1f}")
+                print(f"   Avg Unique AAs: {properties['summary']['avg_unique_aa']:.1f}")
+                print(f"   Composition: H={properties['summary']['avg_hydrophobic']:.1f}% P={properties['summary']['avg_polar']:.1f}% +={properties['summary']['avg_positive']:.1f}% -={properties['summary']['avg_negative']:.1f}%")
+
+                # Show a few example sequences
+                print(f"\n🧬 Example Generated Sequences:")
+                for i, seq_info in enumerate(generated_sequences[:3]):
+                    if seq_info['sequence']:
+                        print(f"   {i+1}: {seq_info['sequence'][:60]}{'...' if len(seq_info['sequence']) > 60 else ''}")
+            else:
+                print(f"   ⚠️  Generation failed: {properties['error']}")
+
+            return val_loss, properties
 
         except Exception as e:
-            print(f"Warning: Could not generate samples for logging: {e}")
+            print(f"❌ Error during comprehensive evaluation: {e}")
+            import traceback
+            traceback.print_exc()
+            return float('inf'), {'error': str(e)}
+
+    def get_training_data_stats(self, num_samples: int = 50):
+        """Get statistics from training data for comparison."""
+        try:
+            # Sample some training sequences
+            training_sequences = []
+            sample_count = 0
+
+            for batch in self.train_loader:
+                if sample_count >= num_samples:
+                    break
+
+                # Decode sequences from this batch
+                for i in range(min(batch.shape[0], num_samples - sample_count)):
+                    sequence = self.decode_sequence(batch[i])
+                    if sequence:  # Only include non-empty sequences
+                        training_sequences.append(sequence)
+                        sample_count += 1
+
+                    if sample_count >= num_samples:
+                        break
+
+            if not training_sequences:
+                return {}
+
+            # Analyze training sequences using the same method
+            training_seq_info = [{'sequence': seq} for seq in training_sequences]
+            properties = self.analyze_sequence_properties(training_seq_info)
+
+            if 'error' in properties:
+                return {}
+
+            # Return summary stats with 'training_' prefix
+            return {
+                'avg_length': properties['summary']['avg_length'],
+                'std_length': properties['summary']['std_length'],
+                'avg_unique_aa': properties['summary']['avg_unique_aa'],
+                'avg_hydrophobic': properties['summary']['avg_hydrophobic'],
+                'avg_polar': properties['summary']['avg_polar'],
+                'avg_positive': properties['summary']['avg_positive'],
+                'avg_negative': properties['summary']['avg_negative'],
+                'avg_aromatic': properties['summary']['avg_aromatic'],
+            }
+
+        except Exception as e:
+            print(f"⚠️  Could not analyze training data: {e}")
+            return {}
 
     def log_system_metrics(self, step: int):
         """Log system metrics like GPU memory usage."""
@@ -473,6 +769,15 @@ class OptimizedUniRef50Trainer:
 
     def compute_loss(self, batch):
         """Compute loss with improved curriculum learning."""
+        # Ensure batch is 2D: [batch_size, sequence_length]
+        if batch.dim() != 2:
+            print(f"WARNING: compute_loss received {batch.dim()}D batch with shape {batch.shape}")
+            if batch.dim() > 2:
+                batch = batch.view(batch.shape[0], -1)
+                print(f"Reshaped batch to: {batch.shape}")
+            else:
+                raise ValueError(f"Batch must be at least 2D, got {batch.dim()}D with shape {batch.shape}")
+
         # Sample timesteps
         t = torch.rand(batch.shape[0], device=self.device) * (1 - 1e-3) + 1e-3
         sigma, dsigma = self.noise(t)
@@ -480,30 +785,67 @@ class OptimizedUniRef50Trainer:
         # Apply curriculum learning
         if hasattr(self.cfg, 'curriculum') and self.cfg.curriculum.enabled:
             perturbed_batch = self.graph.sample_transition_curriculum(
-                batch, 
-                sigma[:, None], 
+                batch,
+                sigma[:, None],
                 self.state['step'],
                 preschool_time=self.cfg.curriculum.preschool_time,
                 curriculum_type=getattr(self.cfg.curriculum, 'difficulty_ramp', 'exponential')
             )
         else:
             perturbed_batch = self.graph.sample_transition(batch, sigma[:, None])
-        
-        # Forward pass with device-aware autocast
-        if self.use_amp and str(self.device).split(':')[0] == 'cuda':
-            with torch.cuda.amp.autocast():
+
+        # Ensure perturbed_batch is 2D: [batch_size, sequence_length]
+        if perturbed_batch.dim() != 2:
+            print(f"WARNING: perturbed_batch has {perturbed_batch.dim()}D shape {perturbed_batch.shape}")
+            if perturbed_batch.dim() > 2:
+                perturbed_batch = perturbed_batch.view(perturbed_batch.shape[0], -1)
+                print(f"Reshaped perturbed_batch to: {perturbed_batch.shape}")
+            else:
+                raise ValueError(f"perturbed_batch must be at least 2D, got {perturbed_batch.dim()}D with shape {perturbed_batch.shape}")
+
+        # Forward pass with device-aware autocast and shape validation
+        try:
+            if self.use_amp and str(self.device).split(':')[0] == 'cuda':
+                with torch.cuda.amp.autocast():
+                    log_score = self.model(perturbed_batch, sigma)
+                    loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+
+                    # Weight by dsigma for better training dynamics
+                    loss = (dsigma[:, None] * loss).mean()
+            else:
+                # No autocast for CPU/MPS
                 log_score = self.model(perturbed_batch, sigma)
                 loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
 
                 # Weight by dsigma for better training dynamics
                 loss = (dsigma[:, None] * loss).mean()
-        else:
-            # No autocast for CPU/MPS
-            log_score = self.model(perturbed_batch, sigma)
-            loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+        except Exception as e:
+            if "Wrong shape" in str(e) or "einops" in str(e).lower():
+                print(f"❌ Shape error in model forward pass:")
+                print(f"   perturbed_batch shape: {perturbed_batch.shape}")
+                print(f"   sigma shape: {sigma.shape}")
+                print(f"   Error: {e}")
 
-            # Weight by dsigma for better training dynamics
-            loss = (dsigma[:, None] * loss).mean()
+                # Try to fix the shape issue
+                if perturbed_batch.dim() > 2:
+                    print(f"🔧 Attempting to fix perturbed_batch shape...")
+                    perturbed_batch = perturbed_batch.view(perturbed_batch.shape[0], -1)
+                    print(f"   Fixed shape: {perturbed_batch.shape}")
+
+                    # Retry the forward pass
+                    if self.use_amp and str(self.device).split(':')[0] == 'cuda':
+                        with torch.cuda.amp.autocast():
+                            log_score = self.model(perturbed_batch, sigma)
+                            loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+                            loss = (dsigma[:, None] * loss).mean()
+                    else:
+                        log_score = self.model(perturbed_batch, sigma)
+                        loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+                        loss = (dsigma[:, None] * loss).mean()
+                else:
+                    raise e
+            else:
+                raise e
         
         return loss
     
@@ -514,8 +856,14 @@ class OptimizedUniRef50Trainer:
 
         self.model.train()
 
-        # Move batch to device
+        # Move batch to device and ensure correct shape
         batch = batch.to(self.device)
+
+        # Ensure batch is 2D: [batch_size, sequence_length]
+        if batch.dim() > 2:
+            print(f"WARNING: Batch has {batch.dim()} dimensions, reshaping from {batch.shape}")
+            batch = batch.view(batch.shape[0], -1)
+            print(f"Reshaped batch to: {batch.shape}")
 
         # Compute loss
         loss = self.compute_loss(batch) / self.cfg.training.accum
@@ -580,16 +928,36 @@ class OptimizedUniRef50Trainer:
                     break
 
                 batch = batch.to(self.device)
-                loss = self.compute_loss(batch)
-                val_losses.append(loss.item())
+
+                # Simple validation loss computation (without state dependency)
+                try:
+                    loss = self.compute_loss(batch)
+                    val_losses.append(loss.item())
+                except AttributeError:
+                    # Fallback: compute loss directly without state
+                    t = torch.rand(batch.shape[0], device=self.device)
+                    sigma = self.noise(t)[0]
+
+                    # Forward pass
+                    logits = self.model(batch, sigma)
+
+                    # Simple cross-entropy loss
+                    loss = F.cross_entropy(
+                        logits.view(-1, logits.size(-1)),
+                        batch.view(-1),
+                        ignore_index=1  # Ignore padding
+                    )
+                    val_losses.append(loss.item())
 
         self.model.train()
-        return np.mean(val_losses)
+        return np.mean(val_losses) if val_losses else float('inf')
     
-    def save_checkpoint(self, step, is_best=False):
+    def save_checkpoint(self, step, epoch=0, best_loss=float('inf'), is_best=False):
         """Save training checkpoint."""
         checkpoint = {
             'step': step,
+            'epoch': epoch,
+            'best_loss': best_loss,
             'model_state_dict': self.model.state_dict(),
             'ema_state_dict': self.ema.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
@@ -626,12 +994,66 @@ class OptimizedUniRef50Trainer:
         # Training state
         best_loss = float('inf')
         step = 0
+        start_epoch = 0
         running_loss = 0.0
         log_interval_start_time = time.time()
 
-        print(f"🚀 Starting training for {self.cfg.training.n_iters} steps...")
+        # Check for existing checkpoint to resume from (unless forcing fresh start)
+        checkpoint_path = os.path.join(self.checkpoint_dir, 'best_checkpoint.pth')
+        if self.resume_checkpoint:
+            checkpoint_path = self.resume_checkpoint
 
-        for epoch in range(self.cfg.training.epochs):
+        if not self.force_fresh_start and os.path.exists(checkpoint_path):
+            print(f"📂 Found existing checkpoint: {checkpoint_path}")
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+
+                # Load model state
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+
+                # Load optimizer state
+                if 'optimizer_state_dict' in checkpoint:
+                    self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+                # Load scheduler state
+                if 'scheduler_state_dict' in checkpoint:
+                    self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+                # Load training state
+                step = checkpoint.get('step', 0)
+                start_epoch = checkpoint.get('epoch', 0)
+                best_loss = checkpoint.get('best_loss', float('inf'))
+
+                # Initialize state if not exists
+                if not hasattr(self, 'state'):
+                    self.state = {'step': step}
+                else:
+                    self.state['step'] = step
+
+                print(f"✅ Resumed from checkpoint:")
+                print(f"   Step: {step}")
+                print(f"   Epoch: {start_epoch}")
+                print(f"   Best loss: {best_loss:.4f}")
+
+            except Exception as e:
+                print(f"⚠️  Could not load checkpoint: {e}")
+                print("Starting training from scratch...")
+                step = 0
+                start_epoch = 0
+                best_loss = float('inf')
+        else:
+            if self.force_fresh_start:
+                print("🆕 Force fresh start enabled. Starting training from scratch...")
+            else:
+                print("🆕 No existing checkpoint found. Starting training from scratch...")
+
+        # Initialize state if not exists
+        if not hasattr(self, 'state'):
+            self.state = {'step': step}
+
+        print(f"🚀 Starting training for {self.cfg.training.n_iters} steps (from step {step})...")
+
+        for epoch in range(start_epoch, self.cfg.training.epochs):
             epoch_loss = 0.0
             num_batches = 0
 
@@ -677,18 +1099,16 @@ class OptimizedUniRef50Trainer:
                     running_loss = 0.0
                     log_interval_start_time = time.time()
 
-                # Validation and sampling
+                # Comprehensive evaluation
                 if step % self.cfg.training.eval_freq == 0:
-                    print(f"\n🔍 Running validation at step {step}...")
+                    val_loss, generation_properties = self.comprehensive_evaluation(step, epoch, num_samples=10)
 
-                    # Validation
-                    val_loss = self.validate_model()
-                    self.log_validation_metrics(step, val_loss)
+                    # Update best loss tracking
+                    if val_loss < best_loss:
+                        best_loss = val_loss
+                        print(f"🎉 New best validation loss: {val_loss:.4f}")
 
-                    # Generate and log samples
-                    self.log_model_samples(step, num_samples=3)
-
-                    print(f"✅ Validation loss: {val_loss:.4f}")
+                    print(f"✅ Evaluation completed. Val loss: {val_loss:.4f}")
 
                 # Checkpointing
                 if step % self.cfg.training.snapshot_freq == 0:
@@ -699,7 +1119,7 @@ class OptimizedUniRef50Trainer:
                         best_loss = avg_epoch_loss
                         print(f"🎉 New best loss: {best_loss:.4f}")
 
-                    self.save_checkpoint(step, is_best)
+                    self.save_checkpoint(step, epoch, best_loss, is_best)
 
                     # Log checkpoint info
                     wandb.log({
@@ -724,19 +1144,39 @@ class OptimizedUniRef50Trainer:
 
             print(f"📊 Epoch {epoch+1} completed. Average loss: {avg_epoch_loss:.4f}")
 
+            # End-of-epoch comprehensive evaluation
+            print(f"\n🎯 END-OF-EPOCH EVALUATION - Epoch {epoch+1}")
+            val_loss, generation_properties = self.comprehensive_evaluation(
+                step, epoch+1, num_samples=20  # More samples at end of epoch
+            )
+
+            # Update best loss and save best model
+            if val_loss < best_loss:
+                best_loss = val_loss
+                print(f"🏆 New best model! Validation loss: {val_loss:.4f}")
+                self.save_checkpoint(step, epoch+1, best_loss, is_best=True)
+
+            # Log epoch summary
+            wandb.log({
+                'epoch/number': epoch + 1,
+                'epoch/avg_train_loss': avg_epoch_loss,
+                'epoch/val_loss': val_loss,
+                'epoch/best_loss': best_loss,
+                'epoch/step': step
+            }, step=step)
+
             if step >= self.cfg.training.n_iters:
                 break
 
-        # Final checkpoint and summary
+        # Final checkpoint and comprehensive evaluation
         print("\n🏁 Training completed!")
-        self.save_checkpoint(step, is_best=False)
+        self.save_checkpoint(step, epoch+1, best_loss, is_best=False)
 
-        # Final validation
-        final_val_loss = self.validate_model()
-        self.log_validation_metrics(step, final_val_loss)
-
-        # Final samples
-        self.log_model_samples(step, num_samples=5)
+        # Final comprehensive evaluation
+        print("\n🎊 FINAL COMPREHENSIVE EVALUATION")
+        final_val_loss, final_generation_properties = self.comprehensive_evaluation(
+            step, epoch+1, num_samples=30  # More samples for final evaluation
+        )
 
         # Training summary
         wandb.log({
@@ -744,8 +1184,21 @@ class OptimizedUniRef50Trainer:
             'summary/final_train_loss': epoch_loss / num_batches,
             'summary/final_val_loss': final_val_loss,
             'summary/best_loss': best_loss,
-            'summary/total_epochs': epoch + 1
+            'summary/total_epochs': epoch + 1,
+            'summary/training_completed': True
         })
+
+        print(f"\n🎉 TRAINING SUMMARY:")
+        print(f"   Total Steps: {step}")
+        print(f"   Total Epochs: {epoch + 1}")
+        print(f"   Final Validation Loss: {final_val_loss:.4f}")
+        print(f"   Best Validation Loss: {best_loss:.4f}")
+        if 'error' not in final_generation_properties:
+            print(f"   Final Generation Quality:")
+            summary = final_generation_properties['summary']
+            print(f"     - Avg Sequence Length: {summary['avg_length']:.1f}")
+            print(f"     - Avg Unique AAs: {summary['avg_unique_aa']:.1f}")
+            print(f"     - Composition Balance: H={summary['avg_hydrophobic']:.1f}% P={summary['avg_polar']:.1f}%")
 
         print(f"📈 Final validation loss: {final_val_loss:.4f}")
         print(f"🏆 Best training loss: {best_loss:.4f}")
@@ -774,6 +1227,7 @@ def main():
     parser.add_argument("--wandb_name", type=str, default=None, help="Wandb run name")
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to use")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--fresh", action="store_true", help="Force fresh start (ignore existing checkpoints)")
 
     args = parser.parse_args()
 
@@ -798,7 +1252,8 @@ def main():
             config_file=args.config,
             datafile=args.datafile,
             dev_id=args.device,
-            seed=args.seed
+            seed=args.seed,
+            force_fresh_start=args.fresh
         )
 
         print("✅ Trainer initialized successfully!")

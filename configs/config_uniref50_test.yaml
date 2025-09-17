@@ -1,0 +1,85 @@
+work_dir: /Users/ramanathana/Work/Protein-Ligand-SEDD/protein_lig_sedd
+
+model:
+  name: small
+  type: ddit
+  hidden_size: 512
+  cond_dim: 128
+  length: 512
+  n_blocks: 6
+  n_heads: 8
+  scale_by_sigma: True
+  dropout: 0.1
+  device: cuda:0
+
+defaults:
+  - _self_
+  - model: small
+
+ngpus: 1
+tokens: 25  # 20 amino acids + 5 special tokens
+
+training:
+  batch_size: 16
+  accum: 2
+  epochs: 5
+  max_samples: 10000
+  num_workers: 2
+  seed: 42
+  force_reprocess: False
+  n_iters: 5000
+  snapshot_freq: 500
+  log_freq: 50
+  eval_freq: 500
+  snapshot_freq_for_preemption: 500
+  weight: standard
+  snapshot_sampling: True
+  ema: 0.999
+  task: protein_only
+
+data:
+  train: uniref50
+  valid: uniref50
+  cache_dir: data
+  train_ratio: 0.9
+  val_ratio: 0.1
+  max_protein_len: 512
+  max_ligand_len: 128
+  use_structure: False
+  vocab_size_protein: 25
+  vocab_size_ligand: 2364
+
+graph:
+  type: absorb
+  file: data
+  report_all: False
+
+noise:
+  type: cosine
+  sigma_min: !!float "1e-4"
+  sigma_max: 0.5
+  eps: !!float "0.05"
+
+sampling:
+  predictor: euler
+  steps: 50
+  noise_removal: True
+
+eval:
+  batch_size: 8
+  perplexity: True
+  perplexity_batch_size: 4
+
+optim:
+  weight_decay: 0.01
+  optimizer: AdamW
+  lr: !!float "5e-5"
+  beta1: 0.9
+  beta2: 0.95
+  eps: !!float "1e-8"
+  warmup: 1000
+  grad_clip: 1.0
+
+hydra:
+  run:
+    dir: exp_local/uniref50_test/${now:%Y.%m.%d}/${now:%H%M%S}

@@ -314,6 +314,38 @@ class TransformerBlock(nn.Module):
         else:
             x = device_compatible_modulate(self.norm1(x), shift_msa, scale_msa)
         qkv = self.attn_qkv(x)
+
+        # Debug and fix shape issues
+        if qkv.dim() != 3:
+            print(f"WARNING: qkv has {qkv.dim()}D shape {qkv.shape}, expected 3D [batch, seq, features]")
+            print(f"QKV tensor size: {qkv.numel()} elements")
+
+            if qkv.dim() == 4:
+                # Calculate the correct reshape dimensions
+                batch_size = qkv.shape[0]
+                features = qkv.shape[-1]  # Last dimension should be features
+
+                # Calculate sequence length from total elements
+                total_elements = qkv.numel()
+                seq_len = total_elements // (batch_size * features)
+
+                print(f"Calculated dimensions: batch={batch_size}, seq={seq_len}, features={features}")
+                print(f"Expected total elements: {batch_size * seq_len * features}")
+
+                if batch_size * seq_len * features == total_elements:
+                    qkv = qkv.view(batch_size, seq_len, features)
+                    print(f"Successfully reshaped qkv to: {qkv.shape}")
+                else:
+                    # Fallback: flatten all middle dimensions
+                    qkv = qkv.view(batch_size, -1, features)
+                    print(f"Fallback reshape qkv to: {qkv.shape}")
+            elif qkv.dim() > 4:
+                # For higher dimensions, flatten all middle dimensions
+                batch_size = qkv.shape[0]
+                features = qkv.shape[-1]
+                qkv = qkv.view(batch_size, -1, features)
+                print(f"Flattened high-dim qkv to: {qkv.shape}")
+
         qkv = rearrange(qkv, 'b s (three h d) -> b s three h d', three=3, h=self.n_heads)
         
         # Apply rotary embeddings with device compatibility
@@ -441,6 +473,15 @@ class SEDD(nn.Module, PyTorchModelHubMixin):
         self.output_layer = OutputLayer(dim, self.vocab_size, cond_dim)
 
     def forward(self, indices, sigma):
+        # Ensure indices is 2D: [batch_size, sequence_length]
+        if indices.dim() != 2:
+            print(f"WARNING: Model received {indices.dim()}D indices with shape {indices.shape}")
+            if indices.dim() > 2:
+                indices = indices.view(indices.shape[0], -1)
+                print(f"Reshaped indices to: {indices.shape}")
+            else:
+                raise ValueError(f"indices must be 2D, got {indices.dim()}D with shape {indices.shape}")
+
         x = self.vocab_embed(indices)
         c = self.sigma_map(sigma)  # TimestepEmbedder already includes SiLU
 
