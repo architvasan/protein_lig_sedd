@@ -93,8 +93,8 @@ class HyperparameterSweep:
                 'optim.warmup': 2500,  # Proportionally reduced warmup
                 'noise.sigma_max': 0.5,
                 'sampling.steps': 50,
-                'data.max_protein_len': 256,
-                'sampling_method': 'simple',
+                'data.max_protein_len': 512,
+                'sampling_method': 'rigorous',
             },
             
             # Medium configuration with rigorous sampling
@@ -152,7 +152,7 @@ class HyperparameterSweep:
                 'noise.sigma_max': 0.5,
                 'sampling.steps': 100,
                 'data.max_protein_len': 512,
-                'sampling_method': 'simple',
+                'sampling_method': 'rigorous',
             },
             
             # Curriculum learning focus
