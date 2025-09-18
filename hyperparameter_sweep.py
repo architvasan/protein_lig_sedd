@@ -35,9 +35,9 @@ class HyperparameterSweep:
     def get_hyperparameter_grid(self) -> Dict[str, List[Any]]:
         """Define the hyperparameter search space."""
         return {
-            # Model architecture parameters
+            # Model architecture parameters - FIXED: Ensure hidden_size is divisible by n_heads
             'model.hidden_size': [512, 768, 1024],
-            'model.n_heads': [8, 12, 16],
+            'model.n_heads': [8, 16],  # FIXED: Removed 12 to avoid dimension mismatch
             'model.n_blocks_prot': [6, 8, 12],
             'model.dropout': [0.1, 0.15, 0.2],
             'model.cond_dim': [128, 256, 512],
@@ -74,7 +74,43 @@ class HyperparameterSweep:
             # System parameters
             'sampling_method': ['rigorous'],
         }
-    
+
+    def validate_model_dimensions(self, hidden_size: int, n_heads: int) -> bool:
+        """
+        Validate that hidden_size is divisible by n_heads to avoid dimension mismatch.
+
+        Args:
+            hidden_size: Model hidden dimension
+            n_heads: Number of attention heads
+
+        Returns:
+            True if compatible, False otherwise
+        """
+        return hidden_size % n_heads == 0
+
+    def get_compatible_combinations(self) -> List[Dict[str, int]]:
+        """
+        Get all valid combinations of hidden_size and n_heads.
+
+        Returns:
+            List of compatible (hidden_size, n_heads) combinations
+        """
+        grid = self.get_hyperparameter_grid()
+        hidden_sizes = grid['model.hidden_size']
+        n_heads_options = grid['model.n_heads']
+
+        compatible = []
+        for hidden_size in hidden_sizes:
+            for n_heads in n_heads_options:
+                if self.validate_model_dimensions(hidden_size, n_heads):
+                    compatible.append({
+                        'hidden_size': hidden_size,
+                        'n_heads': n_heads,
+                        'head_dim': hidden_size // n_heads
+                    })
+
+        return compatible
+
     def get_predefined_configs(self) -> List[Dict[str, Any]]:
         """Get a set of predefined promising configurations."""
         return [
@@ -101,7 +137,7 @@ class HyperparameterSweep:
             {
                 'name': 'medium_rigorous',
                 'model.hidden_size': 768,
-                'model.n_heads': 12,
+                'model.n_heads': 16,  # FIXED: 768 ÷ 16 = 48 (integer)
                 'model.n_blocks_prot': 8,
                 'model.dropout': 0.15,
                 'model.cond_dim': 256,
@@ -139,7 +175,7 @@ class HyperparameterSweep:
             {
                 'name': 'high_lr_experiment',
                 'model.hidden_size': 768,
-                'model.n_heads': 12,
+                'model.n_heads': 16,  # FIXED: 768 ÷ 16 = 48 (integer)
                 'model.n_blocks_prot': 8,
                 'model.dropout': 0.2,
                 'model.cond_dim': 256,
@@ -154,12 +190,12 @@ class HyperparameterSweep:
                 'data.max_protein_len': 512,
                 'sampling_method': 'rigorous',
             },
-            
+
             # Curriculum learning focus
             {
                 'name': 'curriculum_focus',
                 'model.hidden_size': 768,
-                'model.n_heads': 12,
+                'model.n_heads': 16,  # FIXED: 768 ÷ 16 = 48 (integer)
                 'model.n_blocks_prot': 8,
                 'model.dropout': 0.15,
                 'model.cond_dim': 256,
@@ -176,7 +212,35 @@ class HyperparameterSweep:
                 'sampling_method': 'rigorous',
             },
         ]
-    
+
+    def validate_all_predefined_configs(self) -> bool:
+        """
+        Validate that all predefined configurations have compatible dimensions.
+
+        Returns:
+            True if all configs are valid, False otherwise
+        """
+        configs = self.get_predefined_configs()
+        all_valid = True
+
+        print("🔍 Validating predefined configurations:")
+        for config in configs:
+            name = config['name']
+            hidden_size = config['model.hidden_size']
+            n_heads = config['model.n_heads']
+
+            is_valid = self.validate_model_dimensions(hidden_size, n_heads)
+            head_dim = hidden_size // n_heads if is_valid else "INVALID"
+
+            status = "✅" if is_valid else "❌"
+            print(f"   {status} {name}: {hidden_size} hidden, {n_heads} heads → head_dim={head_dim}")
+
+            if not is_valid:
+                all_valid = False
+                print(f"      ERROR: {hidden_size} is not divisible by {n_heads}")
+
+        return all_valid
+
     def create_config_from_params(self, params: Dict[str, Any], config_name: str) -> str:
         """Create a config file from parameter dictionary."""
         config = self.base_config.copy()
@@ -272,6 +336,12 @@ class HyperparameterSweep:
         """Run sweep with predefined configurations using multiple GPUs."""
         if available_gpus is None:
             available_gpus = [0, 1, 2, 3]  # Default to 4 GPUs
+
+        # Validate all predefined configurations first
+        print("🔍 Validating predefined configurations...")
+        if not self.validate_all_predefined_configs():
+            raise ValueError("❌ Some predefined configurations have incompatible dimensions! Please fix them.")
+        print("✅ All predefined configurations are valid!\n")
 
         configs = self.get_predefined_configs()
 
@@ -376,12 +446,28 @@ class HyperparameterSweep:
         print(f"⚡ Max concurrent jobs: {len(available_gpus)}")
         print()
 
-        # Generate random configurations
+        # Generate random configurations with dimension validation
         configs = []
+        compatible_combinations = self.get_compatible_combinations()
+
+        print(f"🔧 Compatible (hidden_size, n_heads) combinations:")
+        for combo in compatible_combinations:
+            print(f"   {combo['hidden_size']} hidden, {combo['n_heads']} heads → head_dim={combo['head_dim']}")
+        print()
+
         for i in range(num_configs):
             config = {'name': f'random_{i:03d}'}
+
+            # First, randomly select a compatible (hidden_size, n_heads) combination
+            combo = random.choice(compatible_combinations)
+            config['model.hidden_size'] = combo['hidden_size']
+            config['model.n_heads'] = combo['n_heads']
+
+            # Then randomly select other parameters
             for param, values in grid.items():
-                config[param] = random.choice(values)
+                if param not in ['model.hidden_size', 'model.n_heads']:  # Skip already set params
+                    config[param] = random.choice(values)
+
             configs.append(config)
 
         # Create summary file
