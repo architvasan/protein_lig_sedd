@@ -691,6 +691,10 @@ class OptimizedUniRef50Trainer:
 
         print(f"\n🧬 Quick generation test - Step {step} (max_length: {max_length})")
 
+        # Create samples directory
+        samples_dir = os.path.join(self.work_dir, "generated_samples", "quick_generation")
+        os.makedirs(samples_dir, exist_ok=True)
+
         try:
             # Use the configured sampling method for quick test
             start_time = time.time()
@@ -749,6 +753,17 @@ class OptimizedUniRef50Trainer:
                         'quick_gen/esm_perplexity_min': np.min(quick_esm_perplexities),
                         'quick_gen/esm_perplexity_max': np.max(quick_esm_perplexities),
                     }
+
+                # Save samples to file system
+                self.save_generation_samples(
+                    sequences=sequences,
+                    step=step,
+                    epoch=epoch,
+                    sample_type="quick_generation",
+                    esm_perplexities=quick_esm_perplexities,
+                    generation_time=generation_time,
+                    sampling_method=self.sampling_method
+                )
 
                 # Log to wandb
                 wandb.log({
@@ -1085,6 +1100,20 @@ class OptimizedUniRef50Trainer:
             else:
                 print(f"   ⚠️  Generation failed: {properties['error']}")
 
+            # Save samples to file system (if generation was successful)
+            if 'error' not in properties and 'generated_sequences' in locals():
+                self.save_generation_samples(
+                    sequences=generated_sequences,
+                    step=step,
+                    epoch=epoch,
+                    sample_type="comprehensive_evaluation",
+                    esm_perplexities=esm_perplexities,
+                    generation_time=None,  # Not tracked in comprehensive eval
+                    sampling_method=sampling_method,
+                    validation_loss=val_loss,
+                    properties=properties
+                )
+
             return val_loss, properties
 
         except Exception as e:
@@ -1092,6 +1121,86 @@ class OptimizedUniRef50Trainer:
             import traceback
             traceback.print_exc()
             return float('inf'), {'error': str(e)}
+
+    def save_generation_samples(self, sequences, step, epoch, sample_type,
+                              esm_perplexities=None, generation_time=None,
+                              sampling_method=None, validation_loss=None, properties=None):
+        """Save generated samples to file system for offline analysis."""
+        import json
+        from datetime import datetime
+
+        try:
+            # Create samples directory
+            samples_dir = os.path.join(self.work_dir, "generated_samples", sample_type)
+            os.makedirs(samples_dir, exist_ok=True)
+
+            # Create filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"step_{step:06d}_epoch_{epoch:03d}_{timestamp}.json"
+            filepath = os.path.join(samples_dir, filename)
+
+            # Prepare data for saving
+            save_data = {
+                'metadata': {
+                    'step': step,
+                    'epoch': epoch,
+                    'sample_type': sample_type,
+                    'timestamp': timestamp,
+                    'sampling_method': sampling_method,
+                    'generation_time': generation_time,
+                    'validation_loss': validation_loss,
+                    'num_sequences': len(sequences),
+                    'config': {
+                        'max_protein_len': safe_getattr(self.cfg, 'data.max_protein_len', 512),
+                        'vocab_size': safe_getattr(self.cfg, 'data.vocab_size_protein', 25),
+                        'model_hidden_size': safe_getattr(self.cfg, 'model.hidden_size', 768),
+                        'model_n_heads': safe_getattr(self.cfg, 'model.n_heads', 12),
+                    }
+                },
+                'sequences': [],
+                'statistics': properties if properties else {}
+            }
+
+            # Add sequence data
+            for i, seq_info in enumerate(sequences):
+                seq_data = {
+                    'id': seq_info.get('sample_id', i),
+                    'sequence': seq_info.get('sequence', ''),
+                    'length': seq_info.get('length', 0),
+                    'unique_amino_acids': seq_info.get('unique_amino_acids', 0),
+                    'raw_tokens': seq_info.get('raw_tokens', [])
+                }
+
+                # Add ESM perplexity if available
+                if esm_perplexities and i < len(esm_perplexities):
+                    seq_data['esm_perplexity'] = float(esm_perplexities[i])
+
+                save_data['sequences'].append(seq_data)
+
+            # Save to JSON file
+            with open(filepath, 'w') as f:
+                json.dump(save_data, f, indent=2)
+
+            print(f"💾 Saved {len(sequences)} samples to: {filepath}")
+
+            # Also save a simple FASTA file for easy sequence analysis
+            fasta_filename = f"step_{step:06d}_epoch_{epoch:03d}_{timestamp}.fasta"
+            fasta_filepath = os.path.join(samples_dir, fasta_filename)
+
+            with open(fasta_filepath, 'w') as f:
+                for i, seq_info in enumerate(sequences):
+                    if seq_info.get('sequence'):
+                        seq_id = seq_info.get('sample_id', i)
+                        esm_ppl = f"_ESM_PPL_{esm_perplexities[i]:.2f}" if esm_perplexities and i < len(esm_perplexities) else ""
+                        f.write(f">sample_{seq_id}_step_{step}_epoch_{epoch}{esm_ppl}\n")
+                        f.write(f"{seq_info['sequence']}\n")
+
+            print(f"🧬 Saved FASTA sequences to: {fasta_filepath}")
+
+        except Exception as e:
+            print(f"⚠️  Error saving samples: {e}")
+            import traceback
+            traceback.print_exc()
 
     def get_training_data_stats(self, num_samples: int = 50):
         """Get statistics from training data for comparison."""
