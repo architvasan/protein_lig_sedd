@@ -208,6 +208,8 @@ class HyperparameterSweep:
         """Run a single training job on specified GPU."""
         wandb_name = f"sweep_{job_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
+        # When using CUDA_VISIBLE_DEVICES, the training script should use cuda:0
+        # because the specified GPU becomes the only visible GPU (index 0)
         cmd = [
             'python', '-m', 'protlig_dd.training.run_train_uniref50_optimized',
             '--work_dir', self.work_dir,
@@ -216,28 +218,44 @@ class HyperparameterSweep:
             '--wandb_project', 'uniref50_hyperparam_sweep',
             '--wandb_name', wandb_name,
             '--sampling_method', sampling_method,
-            '--device', f'cuda:{gpu_id}',
+            '--device', 'cuda:0',  # Always use cuda:0 when CUDA_VISIBLE_DEVICES is set
         ]
 
         if dry_run:
-            print(f"🔍 DRY RUN - Would execute on GPU {gpu_id}: {' '.join(cmd)}")
+            print(f"🔍 DRY RUN - Would execute on physical GPU {gpu_id} (CUDA_VISIBLE_DEVICES={gpu_id}):")
+            print(f"    Command: {' '.join(cmd)}")
+            print(f"    Environment: CUDA_VISIBLE_DEVICES={gpu_id}")
             return None
 
-        print(f"🚀 Starting job: {job_name} on GPU {gpu_id}")
+        print(f"🚀 Starting job: {job_name} on physical GPU {gpu_id}")
         print(f"   Config: {config_path}")
         print(f"   Wandb: {wandb_name}")
         print(f"   Sampling: {sampling_method}")
-        print(f"   Device: cuda:{gpu_id}")
+        print(f"   Physical GPU: {gpu_id} (visible as cuda:0 to process)")
 
         # Create separate log files for stdout and stderr
         stdout_log = os.path.join(self.sweep_dir, f"log_{job_name}_gpu{gpu_id}_stdout.txt")
         stderr_log = os.path.join(self.sweep_dir, f"log_{job_name}_gpu{gpu_id}_stderr.txt")
 
-        # Set CUDA_VISIBLE_DEVICES for this process
+        # Set CUDA_VISIBLE_DEVICES to isolate this job to specific GPU
         env = os.environ.copy()
         env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
 
+        # Add debug info to environment for logging
+        env['SWEEP_PHYSICAL_GPU'] = str(gpu_id)
+        env['SWEEP_JOB_NAME'] = job_name
+
         with open(stdout_log, 'w') as stdout_f, open(stderr_log, 'w') as stderr_f:
+            # Write header to stdout log
+            stdout_f.write(f"=== Hyperparameter Sweep Job: {job_name} ===\n")
+            stdout_f.write(f"Physical GPU: {gpu_id}\n")
+            stdout_f.write(f"CUDA_VISIBLE_DEVICES: {gpu_id}\n")
+            stdout_f.write(f"Training device: cuda:0 (maps to physical GPU {gpu_id})\n")
+            stdout_f.write(f"Command: {' '.join(cmd)}\n")
+            stdout_f.write(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            stdout_f.write("=" * 50 + "\n\n")
+            stdout_f.flush()
+
             process = subprocess.Popen(
                 cmd,
                 stdout=stdout_f,
@@ -246,6 +264,7 @@ class HyperparameterSweep:
             )
 
         print(f"   Logs: {stdout_log} | {stderr_log}")
+        print(f"   Environment: CUDA_VISIBLE_DEVICES={gpu_id}")
         return process
     
     def run_predefined_sweep(self, dry_run: bool = False, available_gpus: List[int] = None):
