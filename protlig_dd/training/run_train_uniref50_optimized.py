@@ -866,13 +866,13 @@ class OptimizedUniRef50Trainer:
         if not valid_sequences:
             return {'error': 'No valid sequences generated'}
 
-        # Amino acid property groups
-        hydrophobic = set('AILMFPWV')
-        polar = set('NQSTC')
-        charged_positive = set('RHK')
-        charged_negative = set('DE')
-        aromatic = set('FWY')
-        small = set('AGST')
+        # Amino acid property groups (biochemical classification)
+        hydrophobic = set('AILMFPWV')        # Hydrophobic/nonpolar amino acids
+        polar = set('NQSTC')                 # Polar uncharged amino acids
+        charged_positive = set('RHK')        # Positively charged (basic): Arg, His, Lys
+        charged_negative = set('DE')         # Negatively charged (acidic): Asp, Glu
+        aromatic = set('FWY')                # Aromatic amino acids
+        small = set('AGST')                  # Small amino acids
 
         # Analyze each sequence
         properties = {
@@ -953,16 +953,19 @@ class OptimizedUniRef50Trainer:
 
             # 2. Generate sequences using specified method
             print(f"🧬 Generating protein sequences using {sampling_method} method...")
+            # Use same max length as training data for consistency
+            eval_max_length = safe_getattr(self.cfg, 'data.max_protein_len', 512)
+
             if sampling_method == "rigorous":
                 generated_sequences = self.generate_protein_sequences(
                     num_samples=num_samples,
-                    max_length=200,  # Reasonable length for evaluation
+                    max_length=eval_max_length,  # Match training data length
                     sampling_method="rigorous"
                 )
             else:
                 generated_sequences = self.generate_protein_sequences(
                     num_samples=num_samples,
-                    max_length=200,  # Reasonable length for evaluation
+                    max_length=eval_max_length,  # Match training data length
                     sampling_method="simple",
                     num_diffusion_steps=30,  # More steps for better quality
                     temperature=0.9  # Slightly focused sampling
