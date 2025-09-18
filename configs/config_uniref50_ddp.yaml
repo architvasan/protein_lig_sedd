@@ -1,0 +1,123 @@
+# UniRef50 SEDD Training Configuration - Optimized for DDP
+# This config is designed for multi-GPU distributed training
+
+work_dir: /Users/ramanathana/Work/Protein-Ligand-SEDD/protein_lig_sedd
+
+model:
+  name: medium           
+  type: ddit
+  hidden_size: 768      # Balanced size for multi-GPU training
+  cond_dim: 256         # Good conditioning capacity
+  length: 512           # Reasonable sequence length
+  n_blocks_prot: 8      # Efficient depth for distributed training
+  n_blocks_lig: 8
+  n_heads: 12           # Good balance for attention
+  scale_by_sigma: True
+  dropout: 0.1          # Standard dropout for stability
+  esm_dim: 640
+  molformer_dim: 768
+  device: cuda:0        # Will be overridden by DDP
+
+defaults:
+  - _self_
+  - model: medium
+
+ngpus: 1                # Will be set automatically by DDP
+tokens: 36              # Protein vocabulary size
+
+training:
+  batch_size: 16        # Per-GPU batch size (effective = 16 * accum * num_gpus)
+  accum: 4              # Gradient accumulation steps
+  epochs: 50
+  max_samples: 50000000
+  num_workers: 4        # Workers per GPU
+  seed: 42              # Base seed (will be offset per GPU)
+  force_reprocess: False
+  n_iters: 500000       # Total training iterations
+  snapshot_freq: 2000   # Checkpoint frequency
+  log_freq: 100         # Logging frequency
+  eval_freq: 2000       # Evaluation frequency
+  snapshot_freq_for_preemption: 2000
+  weight: standard
+  snapshot_sampling: True
+  ema: 0.9995           # EMA decay rate
+  task: protein_only    # Single modality focus
+
+data:
+  train: uniref50
+  valid: uniref50
+  cache_dir: data
+  train_ratio: 0.95     # Use most data for training
+  val_ratio: 0.05
+  max_protein_len: 512  # Reasonable length for memory efficiency
+  max_ligand_len: 128
+  use_structure: False
+  vocab_size_protein: 36
+  vocab_size_ligand: 2364
+
+graph:
+  type: absorb
+  file: data
+  report_all: False
+
+noise:
+  type: cosine          # Cosine schedule works well for long training
+  sigma_min: !!float "1e-4"
+  sigma_max: 0.8        # Moderate noise level
+  eps: !!float "0.02"   # Small epsilon for stability
+
+sampling:
+  predictor: euler
+  steps: 100            # Good balance of quality vs speed
+  noise_removal: True
+
+eval:
+  batch_size: 16        # Per-GPU eval batch size
+  perplexity: True
+  perplexity_batch_size: 8
+
+optim:
+  weight_decay: 0.01    # Regularization
+  optimizer: AdamW
+  lr: !!float "5e-5"    # Base learning rate (will be scaled by num_gpus)
+  beta1: 0.9
+  beta2: 0.999          # Standard beta2
+  eps: !!float "1e-8"
+  warmup: 5000          # Base warmup steps (will be scaled by num_gpus)
+  grad_clip: 1.0        # Gradient clipping
+
+# Learning rate schedule - optimized for DDP
+lr_schedule:
+  type: cosine_with_warmup
+  warmup_steps: 5000    # Will be scaled by DDP
+  max_steps: 500000
+  min_lr_ratio: 0.01    # Lower minimum LR
+
+# Curriculum learning - conservative for stability
+curriculum:
+  enabled: True
+  preschool_time: 10000  # Moderate ramp-up
+  difficulty_ramp: linear  # Predictable progression
+
+# Memory optimization for multi-GPU
+memory:
+  gradient_checkpointing: False  # Disable for better DDP performance
+  mixed_precision: True          # Enable AMP for memory efficiency
+  max_memory_per_gpu: 0.85      # Leave some headroom per GPU
+
+# Enhanced monitoring
+monitoring:
+  log_gradients: False   # Disable for DDP performance
+  log_weights: False     # Disable for DDP performance
+  sample_frequency: 2000 # Less frequent sampling in DDP
+
+# DDP-specific settings
+ddp:
+  find_unused_parameters: False  # Set to True if you have unused parameters
+  broadcast_buffers: True        # Synchronize buffers across processes
+  gradient_as_bucket_view: True  # Memory optimization
+  static_graph: False           # Set to True if your model structure is static
+
+hydra:
+  run:
+    dir: exp_local/uniref50_ddp/${now:%Y.%m.%d}/${now:%H%M%S}
