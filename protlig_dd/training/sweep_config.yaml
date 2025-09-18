@@ -1,0 +1,78 @@
+program: run_train_uniref50_optimized.py
+method: bayes
+metric:
+  goal: minimize
+  name: validation/loss
+parameters:
+  # Limit epochs for fast hyperparameter screening
+  epochs:
+    value: 2
+  
+  # Learning rate - most important hyperparameter
+  learning_rate:
+    distribution: log_uniform_values
+    min: 1e-5
+    max: 1e-3
+  
+  # Batch size - memory vs convergence tradeoff
+  batch_size:
+    values: [8, 16, 32]
+  
+  # Model architecture
+  hidden_size:
+    values: [256, 512, 768]
+  
+  n_blocks:
+    values: [4, 6, 8]
+  
+  n_heads:
+    values: [4, 8, 12]
+  
+  dropout:
+    distribution: uniform
+    min: 0.05
+    max: 0.3
+  
+  # Optimizer settings
+  weight_decay:
+    distribution: log_uniform_values
+    min: 1e-4
+    max: 1e-1
+  
+  warmup_steps:
+    values: [500, 1000, 2000]
+  
+  # Training dynamics
+  accumulation_steps:
+    values: [1, 2, 4]
+  
+  ema_decay:
+    values: [0.995, 0.999, 0.9995]
+  
+  # Noise schedule
+  sigma_min:
+    distribution: log_uniform_values
+    min: 1e-5
+    max: 1e-3
+  
+  sigma_max:
+    distribution: uniform
+    min: 0.3
+    max: 0.8
+  
+  # Curriculum learning
+  curriculum_enabled:
+    values: [true, false]
+  
+  preschool_time:
+    values: [1000, 2000, 5000]
+
+# Early termination for bad runs
+early_terminate:
+  type: hyperband
+  min_iter: 1
+  eta: 2
+  s: 2
+
+# Run configuration
+count: 50  # Number of runs in the sweep
