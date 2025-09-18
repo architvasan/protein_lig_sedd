@@ -11,7 +11,7 @@ WORK_DIR="./hyperparam_experiments"
 DATAFILE="./input_data/processed_uniref50.pt"
 SWEEP_TYPE="predefined"
 NUM_RANDOM=10
-MAX_CONCURRENT=2
+GPUS="0,1,2,3"
 DRY_RUN=false
 
 # Colors for output
@@ -51,7 +51,7 @@ OPTIONS:
     -d, --datafile PATH     Data file path (default: $DATAFILE)
     -t, --type TYPE         Sweep type: predefined|random (default: $SWEEP_TYPE)
     -n, --num-random N      Number of random configs (default: $NUM_RANDOM)
-    -j, --jobs N            Max concurrent jobs (default: $MAX_CONCURRENT)
+    -g, --gpus LIST         Comma-separated GPU IDs (default: $GPUS)
     --dry-run               Print commands without executing
     -h, --help              Show this help message
 
@@ -68,8 +68,11 @@ EXAMPLES:
     # Use custom config and data files
     $0 --config my_config.yaml --datafile my_data.pt
 
-    # Run with more concurrent jobs (if you have multiple GPUs)
-    $0 --jobs 4
+    # Use specific GPUs
+    $0 --gpus 0,1,2,3
+
+    # Use only 2 GPUs
+    $0 --gpus 0,1
 
 PREDEFINED CONFIGURATIONS:
     - small_fast: Quick iteration config (512 hidden, simple sampling)
@@ -110,8 +113,8 @@ while [[ $# -gt 0 ]]; do
             NUM_RANDOM="$2"
             shift 2
             ;;
-        -j|--jobs)
-            MAX_CONCURRENT="$2"
+        -g|--gpus)
+            GPUS="$2"
             shift 2
             ;;
         --dry-run)
@@ -160,9 +163,23 @@ if ! wandb status > /dev/null 2>&1; then
     exit 1
 fi
 
-# Check if GPU is available
+# Check GPU availability and validate specified GPUs
 if ! nvidia-smi > /dev/null 2>&1; then
     print_warning "nvidia-smi not found. Make sure CUDA is available."
+else
+    GPU_COUNT=$(nvidia-smi --list-gpus | wc -l)
+    print_success "Found $GPU_COUNT GPU(s)"
+
+    # Validate specified GPUs
+    IFS=',' read -ra GPU_ARRAY <<< "$GPUS"
+    for gpu_id in "${GPU_ARRAY[@]}"; do
+        if [[ $gpu_id -ge $GPU_COUNT ]]; then
+            print_error "GPU $gpu_id not available. Only GPUs 0-$((GPU_COUNT-1)) are available."
+            exit 1
+        fi
+    done
+
+    print_success "Using GPUs: $GPUS (${#GPU_ARRAY[@]} concurrent jobs)"
 fi
 
 print_success "All validations passed!"
@@ -177,7 +194,8 @@ echo "  🎯 Sweep type: $SWEEP_TYPE"
 if [[ "$SWEEP_TYPE" == "random" ]]; then
     echo "  🎲 Random configs: $NUM_RANDOM"
 fi
-echo "  ⚡ Max concurrent jobs: $MAX_CONCURRENT"
+echo "  🖥️  Available GPUs: $GPUS"
+echo "  ⚡ Max concurrent jobs: $(echo $GPUS | tr ',' '\n' | wc -l)"
 echo "  🔍 Dry run: $DRY_RUN"
 echo ""
 
@@ -190,7 +208,7 @@ CMD="$CMD --base_config '$BASE_CONFIG'"
 CMD="$CMD --work_dir '$WORK_DIR'"
 CMD="$CMD --datafile '$DATAFILE'"
 CMD="$CMD --sweep_type '$SWEEP_TYPE'"
-CMD="$CMD --max_concurrent $MAX_CONCURRENT"
+CMD="$CMD --gpus '$GPUS'"
 
 if [[ "$SWEEP_TYPE" == "random" ]]; then
     CMD="$CMD --num_random $NUM_RANDOM"
