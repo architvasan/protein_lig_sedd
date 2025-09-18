@@ -1,0 +1,98 @@
+# PubChem SMILES SEDD Training Configuration
+# Optimized for SMILES molecular generation
+
+work_dir: /lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd
+
+model:
+  name: medium           
+  type: ddit
+  hidden_size: 768
+  cond_dim: 256
+  length: 512            # Max SMILES length
+  n_blocks_prot: 8
+  n_blocks_lig: 8
+  n_heads: 12
+  scale_by_sigma: True
+  dropout: 0.1
+  esm_dim: 640           # Not used for SMILES-only
+  molformer_dim: 768     # MoLFormer embedding dimension
+  device: cuda:0
+
+defaults:
+  - _self_
+  - model: medium
+
+ngpus: 1
+tokens: 2364             # SMILES vocabulary size from MoLFormer
+
+training:
+  batch_size: 16
+  accum: 4
+  epochs: 50
+  max_samples: 10000000
+  num_workers: 4
+  seed: 42
+  force_reprocess: False
+  n_iters: 200000        # Reasonable for SMILES
+  snapshot_freq: 2000
+  log_freq: 100
+  eval_freq: 1000
+  snapshot_freq_for_preemption: 2000
+  weight: standard
+  snapshot_sampling: True
+  ema: 0.9995
+  task: ligand_only      # SMILES-only training
+
+data:
+  train: pubchem
+  valid: pubchem
+  cache_dir: data
+  train_ratio: 0.95
+  val_ratio: 0.05
+  max_protein_len: 512   # Not used for SMILES-only
+  max_ligand_len: 512    # Max SMILES length
+  use_structure: False
+  vocab_size_protein: 36 # Not used
+  vocab_size_ligand: 2364 # SMILES vocab size
+
+graph:
+  type: absorb
+  file: data
+  report_all: False
+
+noise:
+  type: cosine           # Cosine schedule works well for molecules
+  sigma_min: !!float "1e-4"
+  sigma_max: 0.8
+  eps: !!float "0.02"
+
+sampling:
+  predictor: euler
+  steps: 100
+  noise_removal: True
+
+eval:
+  batch_size: 16
+  perplexity: True
+  perplexity_batch_size: 8
+
+optim:
+  weight_decay: 0.01
+  optimizer: AdamW
+  lr: !!float "3e-5"     # Conservative learning rate for SMILES
+  beta1: 0.9
+  beta2: 0.999
+  eps: !!float "1e-8"
+  warmup: 5000           # Warmup steps
+  grad_clip: 1.0
+
+# Learning rate schedule
+lr_schedule:
+  type: cosine_with_warmup
+  warmup_steps: 5000
+  max_steps: 200000
+  min_lr_ratio: 0.01
+
+hydra:
+  run:
+    dir: exp_local/pubchem_smiles/${now:%Y.%m.%d}/${now:%H%M%S}
