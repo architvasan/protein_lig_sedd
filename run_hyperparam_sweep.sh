@@ -8,7 +8,7 @@ set -e
 # Default values
 BASE_CONFIG="configs/config_uniref50_optimized.yaml"
 WORK_DIR="./hyperparam_experiments"
-DATAFILE="./input_data/processed_uniref50.pt"
+DATAFILE="./input_data/processed_uniref50_sweep.pt"
 SWEEP_TYPE="predefined"
 NUM_RANDOM=10
 GPUS="0,1,2,3"
@@ -147,9 +147,23 @@ if [[ ! -f "$BASE_CONFIG" ]]; then
 fi
 
 if [[ ! -f "$DATAFILE" ]]; then
-    print_error "Data file not found: $DATAFILE"
-    print_warning "You may need to run: ./download_uniref50_data.sh"
-    exit 1
+    print_warning "Sweep dataset not found: $DATAFILE"
+
+    # Check if original dataset exists
+    ORIGINAL_DATAFILE="./input_data/processed_uniref50.pt"
+    if [[ -f "$ORIGINAL_DATAFILE" ]]; then
+        print_status "Creating 10k sample sweep dataset from original..."
+        if python create_sweep_dataset.py --input "$ORIGINAL_DATAFILE" --output "$DATAFILE"; then
+            print_success "Sweep dataset created successfully!"
+        else
+            print_error "Failed to create sweep dataset"
+            exit 1
+        fi
+    else
+        print_error "Original data file not found: $ORIGINAL_DATAFILE"
+        print_warning "You may need to run: ./download_uniref50_data.sh"
+        exit 1
+    fi
 fi
 
 if [[ "$SWEEP_TYPE" != "predefined" && "$SWEEP_TYPE" != "random" ]]; then

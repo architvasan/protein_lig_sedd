@@ -11,6 +11,7 @@ import yaml
 import itertools
 import subprocess
 import time
+import random
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Any, Optional
@@ -49,7 +50,7 @@ class HyperparameterSweep:
             # Optimizer parameters
             'optim.lr': [1e-5, 5e-5, 1e-4, 2e-4],
             'optim.weight_decay': [0.01, 0.05, 0.1],
-            'optim.warmup': [1000, 5000, 10000],
+            'optim.warmup': [1000, 2500, 5000],  # Reduced warmup for smaller dataset
             'optim.beta2': [0.95, 0.99, 0.999],
             'optim.grad_clip': [0.5, 1.0, 2.0],
             
@@ -87,9 +88,9 @@ class HyperparameterSweep:
                 'model.cond_dim': 128,
                 'training.batch_size': 32,
                 'training.accum': 4,
-                'training.n_iters': 50000,
+                'training.n_iters': 25000,  # Reduced iterations for faster sweep
                 'optim.lr': 1e-4,
-                'optim.warmup': 5000,
+                'optim.warmup': 2500,  # Proportionally reduced warmup
                 'noise.sigma_max': 0.5,
                 'sampling.steps': 50,
                 'data.max_protein_len': 256,
@@ -106,9 +107,9 @@ class HyperparameterSweep:
                 'model.cond_dim': 256,
                 'training.batch_size': 32,
                 'training.accum': 4,
-                'training.n_iters': 100000,
+                'training.n_iters': 40000,  # Reduced iterations for faster sweep
                 'optim.lr': 5e-5,
-                'optim.warmup': 10000,
+                'optim.warmup': 4000,  # Proportionally reduced warmup
                 'noise.sigma_max': 0.8,
                 'sampling.steps': 100,
                 'data.max_protein_len': 512,
@@ -125,9 +126,9 @@ class HyperparameterSweep:
                 'model.cond_dim': 512,
                 'training.batch_size': 16,
                 'training.accum': 8,
-                'training.n_iters': 200000,
+                'training.n_iters': 50000,  # Reduced iterations for faster sweep
                 'optim.lr': 2e-5,
-                'optim.warmup': 15000,
+                'optim.warmup': 5000,  # Proportionally reduced warmup
                 'noise.sigma_max': 0.8,
                 'sampling.steps': 200,
                 'data.max_protein_len': 512,
@@ -144,9 +145,9 @@ class HyperparameterSweep:
                 'model.cond_dim': 256,
                 'training.batch_size': 64,
                 'training.accum': 2,
-                'training.n_iters': 75000,
+                'training.n_iters': 30000,  # Reduced iterations for faster sweep
                 'optim.lr': 2e-4,
-                'optim.warmup': 5000,
+                'optim.warmup': 2000,  # Proportionally reduced warmup
                 'optim.weight_decay': 0.05,
                 'noise.sigma_max': 0.5,
                 'sampling.steps': 100,
@@ -164,11 +165,11 @@ class HyperparameterSweep:
                 'model.cond_dim': 256,
                 'training.batch_size': 32,
                 'training.accum': 4,
-                'training.n_iters': 150000,
+                'training.n_iters': 45000,  # Reduced iterations for faster sweep
                 'optim.lr': 1e-4,
-                'optim.warmup': 10000,
+                'optim.warmup': 3000,  # Proportionally reduced warmup
                 'curriculum.enabled': True,
-                'curriculum.preschool_time': 20000,
+                'curriculum.preschool_time': 6000,  # Proportionally reduced preschool time
                 'noise.sigma_max': 0.8,
                 'sampling.steps': 100,
                 'data.max_protein_len': 512,
