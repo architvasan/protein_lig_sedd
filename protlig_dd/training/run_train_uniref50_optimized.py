@@ -714,15 +714,49 @@ class OptimizedUniRef50Trainer:
                 print(f"   📊 Avg length: {avg_length:.1f}, Avg unique AAs: {avg_unique_aa:.1f}")
                 print(f"   🧬 Example: {example_seq}...")
 
+                # Calculate ESM perplexity for quick generation samples (first 3 for speed)
+                print("   🧬 Calculating ESM perplexity for quick generation samples...")
+                quick_esm_perplexities = self.calculate_esm_perplexity(valid_sequences[:3])
+
+                # Create sample table with full sequences and ESM perplexity
+                sample_data = []
+                for i, seq_info in enumerate(valid_sequences[:3]):  # Show first 3
+                    esm_ppl = quick_esm_perplexities[i] if quick_esm_perplexities and i < len(quick_esm_perplexities) else None
+                    sample_data.append([
+                        i + 1,
+                        seq_info['sequence'],  # Full sequence, no truncation
+                        seq_info['length'],
+                        seq_info['unique_amino_acids'],
+                        f"{esm_ppl:.2f}" if esm_ppl is not None else "N/A"
+                    ])
+
+                quick_gen_table = wandb.Table(
+                    columns=['Sample', 'Sequence', 'Length', 'Unique AAs', 'ESM Perplexity'],
+                    data=sample_data
+                )
+
+                # Calculate quick ESM perplexity stats
+                quick_esm_stats = {}
+                if quick_esm_perplexities:
+                    import numpy as np
+                    quick_esm_stats = {
+                        'quick_gen/esm_perplexity_mean': np.mean(quick_esm_perplexities),
+                        'quick_gen/esm_perplexity_std': np.std(quick_esm_perplexities),
+                        'quick_gen/esm_perplexity_min': np.min(quick_esm_perplexities),
+                        'quick_gen/esm_perplexity_max': np.max(quick_esm_perplexities),
+                    }
+
                 # Log to wandb
                 wandb.log({
+                    'quick_gen/samples': quick_gen_table,
                     'quick_gen/valid_sequences': valid_count,
                     'quick_gen/total_sequences': num_samples,
                     'quick_gen/success_rate': valid_count / num_samples,
                     'quick_gen/avg_length': avg_length,
                     'quick_gen/avg_unique_aa': avg_unique_aa,
                     'quick_gen/generation_time': generation_time,
-                    'quick_gen/sampling_method': self.sampling_method
+                    'quick_gen/sampling_method': self.sampling_method,
+                    **quick_esm_stats  # Add ESM perplexity stats
                 }, step=step)
 
                 return True
@@ -786,6 +820,41 @@ class OptimizedUniRef50Trainer:
             import traceback
             traceback.print_exc()
             return False
+
+    def calculate_esm_perplexity(self, generated_sequences):
+        """Calculate ESM perplexity for generated protein sequences."""
+        try:
+            from protlig_dd.utils.eval_metrics import ProteinEvaluator
+
+            # Extract valid sequences
+            valid_sequences = [seq_info['sequence'] for seq_info in generated_sequences
+                             if seq_info['sequence'] and len(seq_info['sequence']) > 0]
+
+            if not valid_sequences:
+                print("⚠️  No valid sequences found for ESM perplexity calculation")
+                return []
+
+            print(f"📊 Calculating ESM perplexity for {len(valid_sequences)} sequences...")
+
+            # Initialize ProteinEvaluator
+            evaluator = ProteinEvaluator()
+
+            # Calculate MLM perplexity using ESM model
+            perplexities = evaluator.calculate_mlm_ppl(
+                sequences=valid_sequences,
+                batch_size=4,  # Small batch size to avoid memory issues
+                mask_fraction=0.15,
+                seed=42
+            )
+
+            print(f"✅ ESM perplexity calculation completed. Mean: {sum(perplexities)/len(perplexities):.2f}")
+            return perplexities
+
+        except Exception as e:
+            print(f"⚠️  Error calculating ESM perplexity: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
 
     def analyze_sequence_properties(self, sequences):
         """Analyze biochemical properties of generated sequences."""
@@ -909,6 +978,10 @@ class OptimizedUniRef50Trainer:
             print("🔍 Analyzing sequence properties...")
             properties = self.analyze_sequence_properties(generated_sequences)
 
+            # 3.5. Calculate ESM perplexity for generated sequences
+            print("🧬 Calculating ESM perplexity for generated sequences...")
+            esm_perplexities = self.calculate_esm_perplexity(generated_sequences)
+
             # 4. Compare with training data (sample a few training sequences)
             print("📚 Sampling training data for comparison...")
             training_comparison = self.get_training_data_stats()
@@ -944,6 +1017,17 @@ class OptimizedUniRef50Trainer:
                 for aa, freq in properties['amino_acid_frequencies'].items():
                     wandb_metrics[f'generation/aa_freq_{aa}'] = freq
 
+            # ESM perplexity metrics
+            if esm_perplexities and len(esm_perplexities) > 0:
+                import numpy as np
+                wandb_metrics.update({
+                    'generation/esm_perplexity_mean': np.mean(esm_perplexities),
+                    'generation/esm_perplexity_std': np.std(esm_perplexities),
+                    'generation/esm_perplexity_min': np.min(esm_perplexities),
+                    'generation/esm_perplexity_max': np.max(esm_perplexities),
+                    'generation/esm_perplexity_median': np.median(esm_perplexities),
+                })
+
             # Training data comparison
             if training_comparison:
                 for key, value in training_comparison.items():
@@ -952,19 +1036,23 @@ class OptimizedUniRef50Trainer:
             # Log to Wandb
             wandb.log(wandb_metrics, step=step)
 
-            # 6. Create and log sample table
+            # 6. Create and log sample table with full sequences and ESM perplexity
             if generated_sequences:
                 sample_data = []
-                for seq_info in generated_sequences[:10]:  # Show top 10
+                for i, seq_info in enumerate(generated_sequences[:10]):  # Show top 10
+                    # Get corresponding ESM perplexity if available
+                    esm_ppl = esm_perplexities[i] if esm_perplexities and i < len(esm_perplexities) else None
+
                     sample_data.append([
                         seq_info['sample_id'],
-                        seq_info['sequence'][:80] + ('...' if len(seq_info['sequence']) > 80 else ''),
+                        seq_info['sequence'],  # Full sequence, no truncation
                         seq_info['length'],
-                        seq_info['unique_amino_acids']
+                        seq_info['unique_amino_acids'],
+                        f"{esm_ppl:.2f}" if esm_ppl is not None else "N/A"
                     ])
 
                 sample_table = wandb.Table(
-                    columns=['Sample ID', 'Generated Sequence', 'Length', 'Unique AAs'],
+                    columns=['Sample ID', 'Generated Sequence', 'Length', 'Unique AAs', 'ESM Perplexity'],
                     data=sample_data
                 )
 
