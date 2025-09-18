@@ -746,7 +746,6 @@ class OptimizedUniRef50Trainer:
                 # Calculate quick ESM perplexity stats
                 quick_esm_stats = {}
                 if quick_esm_perplexities:
-                    import numpy as np
                     quick_esm_stats = {
                         'quick_gen/esm_perplexity_mean': np.mean(quick_esm_perplexities),
                         'quick_gen/esm_perplexity_std': np.std(quick_esm_perplexities),
@@ -1041,7 +1040,6 @@ class OptimizedUniRef50Trainer:
 
             # ESM perplexity metrics
             if esm_perplexities and len(esm_perplexities) > 0:
-                import numpy as np
                 wandb_metrics.update({
                     'generation/esm_perplexity_mean': np.mean(esm_perplexities),
                     'generation/esm_perplexity_std': np.std(esm_perplexities),
