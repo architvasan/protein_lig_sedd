@@ -79,6 +79,7 @@ class OptimizedUniRef50Trainer:
     resume_checkpoint: Optional[str] = None
     force_fresh_start: bool = False
     sampling_method: str = "rigorous"  # "rigorous" or "simple"
+    epochs_override: Optional[int] = None  # Override epochs for hyperparameter sweeps
     
     def __post_init__(self):
         """Initialize trainer components."""
@@ -363,6 +364,7 @@ class OptimizedUniRef50Trainer:
                 # System info
                 'device': str(self.device),
                 'seed': safe_getattr(self.cfg, 'training.seed', 42),
+                'epochs': self.epochs_override if self.epochs_override is not None else safe_getattr(self.cfg, 'training.epochs', 50),
             },
             tags=['uniref50', 'sedd', 'protein', 'diffusion', 'optimized'],
             notes=f"Optimized UniRef50 training with improved V100-compatible attention and enhanced curriculum learning"
@@ -1551,11 +1553,21 @@ class OptimizedUniRef50Trainer:
             else:
                 print("⚠️  Initial generation test had issues - but continuing training")
 
-        for epoch in range(start_epoch, self.cfg.training.epochs):
+        # Use epochs override priority: command line > wandb config > config file
+        if self.epochs_override is not None:
+            total_epochs = self.epochs_override
+        elif wandb.run and 'epochs' in wandb.config:
+            total_epochs = wandb.config.epochs
+        else:
+            total_epochs = self.cfg.training.epochs
+
+        print(f"🔄 Training for {total_epochs} epochs (override: {self.epochs_override}, config: {self.cfg.training.epochs})")
+
+        for epoch in range(start_epoch, total_epochs):
             epoch_loss = 0.0
             num_batches = 0
 
-            progress_bar = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{self.cfg.training.epochs}')
+            progress_bar = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{total_epochs}')
 
             for batch in progress_bar:
                 # Training step with timing
@@ -1736,6 +1748,8 @@ def main():
     parser.add_argument("--sampling_method", type=str, default="rigorous",
                        choices=["rigorous", "simple"],
                        help="Sampling method: 'rigorous' (CTMC) or 'simple' (heuristic)")
+    parser.add_argument("--epochs", type=int, default=None,
+                       help="Override number of epochs (useful for hyperparameter sweeps)")
 
     args = parser.parse_args()
 
@@ -1763,7 +1777,8 @@ def main():
             dev_id=args.device,
             seed=args.seed,
             force_fresh_start=args.fresh,
-            sampling_method=args.sampling_method
+            sampling_method=args.sampling_method,
+            epochs_override=args.epochs
         )
 
         print("✅ Trainer initialized successfully!")
