@@ -683,9 +683,13 @@ class OptimizedUniRef50Trainer:
         else:
             raise ValueError(f"Unknown sampling method: {sampling_method}. Use 'rigorous' or 'simple'.")
 
-    def quick_generation_test(self, step: int, epoch: int, num_samples: int = 3, max_length: int = 80):
+    def quick_generation_test(self, step: int, epoch: int, num_samples: int = 3, max_length: int = None):
         """Quick generation test during training to monitor generation quality."""
-        print(f"\n🧬 Quick generation test - Step {step}")
+        # Use same max length as training data if not specified
+        if max_length is None:
+            max_length = safe_getattr(self.cfg, 'data.max_protein_len', 512)
+
+        print(f"\n🧬 Quick generation test - Step {step} (max_length: {max_length})")
 
         try:
             # Use the configured sampling method for quick test
@@ -1432,7 +1436,9 @@ class OptimizedUniRef50Trainer:
         # Initial generation test to verify setup
         if step == 0:
             print("\n🧪 Running initial generation test to verify setup...")
-            initial_test_success = self.quick_generation_test(step, 0, num_samples=2, max_length=50)
+            # Use shorter length for initial test to be faster, but still reasonable
+            initial_max_length = min(100, safe_getattr(self.cfg, 'data.max_protein_len', 512))
+            initial_test_success = self.quick_generation_test(step, 0, num_samples=2, max_length=initial_max_length)
             if initial_test_success:
                 print("✅ Initial generation test passed - training can proceed")
             else:
