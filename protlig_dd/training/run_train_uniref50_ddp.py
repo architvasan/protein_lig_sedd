@@ -355,12 +355,29 @@ class DDPUniRef50Trainer(OptimizedUniRef50Trainer):
 
                 # Evaluation (main process only)
                 if self.is_main_process and step % self.cfg.training.eval_freq == 0:
-                    val_loss = self.validate_model()
+                    val_loss, recon_loss, fixed_noise_metrics = self.validate_model()
 
-                    wandb.log({
+                    # Build wandb metrics
+                    wandb_metrics = {
                         'val/loss': val_loss,
                         'val/step': step,
-                    }, step=step)
+                    }
+
+                    # Add reconstruction loss if available
+                    if recon_loss is not None:
+                        wandb_metrics['val/reconstruction_loss'] = recon_loss
+                        print(f"   📊 Reconstruction Loss: {recon_loss:.4f}")
+
+                    # Add fixed noise level metrics
+                    if fixed_noise_metrics:
+                        print(f"   📊 Fixed Noise Metrics: {len(fixed_noise_metrics)} levels")
+                        for noise_key, noise_value in sorted(fixed_noise_metrics.items()):
+                            if noise_value is not None:
+                                wandb_metrics[f'val/{noise_key}'] = noise_value
+                                noise_level = noise_key.replace('fixed_noise_', '')
+                                print(f"      σ={noise_level}: {noise_value:.4f}")
+
+                    wandb.log(wandb_metrics, step=step)
 
                     # Save best model
                     if val_loss < best_loss:
