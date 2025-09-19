@@ -34,7 +34,8 @@ from protlig_dd.data.data import get_dataloaders
 from protlig_dd.data.tokenize import Tok_Mol
 from protlig_dd.model.ema import ExponentialMovingAverage
 from protlig_dd.utils.lr_scheduler import WarmupCosineLR
-from protlig_dd.training.smiles_losses import get_smiles_loss_fn
+import protlig_dd.sampling.sampling as sampling
+import json
 
 
 class SMILESDataset(torch.utils.data.Dataset):
@@ -240,7 +241,229 @@ class SMILESTrainer:
         )
         
         print(f"Model ready. Parameters: {sum(p.numel() for p in self.model.parameters()):,}")
-    
+
+    # ---------------------- SMILES generation helpers ----------------------
+    def decode_smiles(self, token_tensor):
+        """Decode token ids (1D tensor or list) to a SMILES string using the Mol tokenizer."""
+        try:
+            if torch.is_tensor(token_tensor):
+                ids = token_tensor.cpu().tolist()
+            else:
+                ids = list(token_tensor)
+
+            # Use the AutoTokenizer.decode if available
+            tok = getattr(self.tokenizer, 'mol_tokenizer', None)
+            if tok is not None and hasattr(tok, 'decode'):
+                # remove padding tokens when decoding
+                return tok.decode([int(x) for x in ids], skip_special_tokens=True, clean_up_tokenization_spaces=True)
+            else:
+                # Fallback: join ids as string (rare)
+                return ''.join([str(x) for x in ids])
+        except Exception as e:
+            print(f"⚠️  Error decoding SMILES tokens: {e}")
+            return ''
+
+    def setup_smiles_sampler(self, batch_size: int = 1, max_length: int = 128, eps: float = 1e-5):
+        """Create a PC sampler for SMILES generation using the repo sampling framework."""
+        sampling_shape = (batch_size, max_length)
+        sampling_fn = sampling.get_sampling_fn(
+            config=self.cfg,
+            graph=self.graph,
+            noise=self.noise,
+            batch_dims=sampling_shape,
+            eps=eps,
+            device=self.device
+        )
+        return sampling_fn
+
+    def generate_smiles_rigorous(self, num_samples: int = 10, max_length: int = 128):
+        """Generate SMILES sequences using the CTMC rigorous sampler."""
+        print(f"🧪 Generating {num_samples} SMILES (rigorous sampler) ...")
+        self.model.eval()
+        generated = []
+
+        with torch.no_grad():
+            # use EMA weights for generation
+            self.ema.store(self.model.parameters())
+            self.ema.copy_to(self.model.parameters())
+
+            try:
+                sampler = self.setup_smiles_sampler(batch_size=num_samples, max_length=max_length)
+
+                # Model wrapper matching sampling framework expectations
+                class ModelWrapper:
+                    def __init__(self, model):
+                        self.model = model
+
+                    def __call__(self, x=None, sigma=None, **kwargs):
+                        # Called by sampler using ligand_indices / timesteps
+                        if 'ligand_indices' in kwargs and 'timesteps' in kwargs:
+                            ligand_indices = kwargs['ligand_indices']
+                            timesteps = kwargs['timesteps']
+                            mode = kwargs.get('mode', 'ligand_only')
+
+                            if mode in ('ligand_only', 'ligand_given_protein'):
+                                return self.model(ligand_indices, timesteps)
+                            else:
+                                raise ValueError(f"SMILES model only supports ligand modes, got {mode}")
+
+                        elif x is not None and sigma is not None:
+                            # Legacy positional interface
+                            return self.model(x, sigma)
+                        else:
+                            raise ValueError(f"ModelWrapper called with invalid args: x={x}, sigma={sigma}, kwargs={list(kwargs.keys())}")
+
+                    def eval(self):
+                        self.model.eval(); return self
+                    def train(self, mode=True):
+                        self.model.train(mode); return self
+                    def parameters(self):
+                        return self.model.parameters()
+                    def state_dict(self):
+                        return self.model.state_dict()
+                    def to(self, device):
+                        self.model.to(device); return self
+                    @property
+                    def device(self):
+                        return next(self.model.parameters()).device
+
+                model_wrapper = ModelWrapper(self.model)
+
+                samples = sampler(model_wrapper, task="ligand_only")
+
+                # Post-process samples
+                for i in range(num_samples):
+                    try:
+                        sample_tokens = samples[i] if len(samples.shape) > 1 else samples
+                        seq = self.decode_smiles(sample_tokens)
+                        generated.append({'sample_id': i, 'raw_tokens': sample_tokens[:max_length].cpu().tolist() if torch.is_tensor(sample_tokens) else sample_tokens, 'smiles': seq})
+                    except Exception as e:
+                        print(f"⚠️ Error processing sample {i}: {e}")
+                        generated.append({'sample_id': i, 'raw_tokens': [], 'smiles': ''})
+
+            except Exception as e:
+                print(f"⚠️ Rigorous sampling failed: {e}")
+                import traceback; traceback.print_exc()
+                print("🔄 Falling back to simple sampling")
+                generated = self.generate_smiles_simple(num_samples, max_length)
+
+            finally:
+                self.ema.restore(self.model.parameters())
+
+        self.model.train()
+        return generated
+
+    def generate_smiles_simple(self, num_samples: int = 10, max_length: int = 128, num_diffusion_steps: int = 50, temperature: float = 1.0):
+        """Simple heuristic sampling for SMILES (temperature multinomial over logits)."""
+        print(f"🧪 Generating {num_samples} SMILES (simple sampler) ...")
+        self.model.eval()
+        generated = []
+
+        with torch.no_grad():
+            for i in range(num_samples):
+                try:
+                    # best-effort vocab / absorbing token
+                    tok = getattr(self.tokenizer, 'mol_tokenizer', None)
+                    vocab_size = getattr(tok, 'vocab_size', None) if tok is not None else None
+                    if vocab_size is None:
+                        vocab_size = safe_getattr(self.cfg, 'data.vocab_size_smiles', 30522)
+                    absorbing_token = vocab_size - 1
+
+                    sample = torch.full((1, max_length), absorbing_token, dtype=torch.long, device=self.device)
+
+                    for step in range(num_diffusion_steps):
+                        t = torch.tensor([1.0 - step / float(num_diffusion_steps)], device=self.device)
+                        device_type = str(self.device).split(':')[0]
+                        if device_type == 'cuda':
+                            with torch.cuda.amp.autocast(enabled=False):
+                                logits = self.model(sample, t)
+                        else:
+                            logits = self.model(sample, t)
+
+                        probs = torch.softmax(logits / temperature, dim=-1)
+                        batch_size, seq_len, vocab_actual = probs.shape
+                        probs_flat = probs.view(-1, vocab_actual)
+                        new_tokens = torch.multinomial(probs_flat, 1).view(batch_size, seq_len)
+
+                        replace_prob = (step + 1) / float(num_diffusion_steps)
+                        mask = torch.rand(batch_size, seq_len, device=self.device) < replace_prob
+                        sample = torch.where(mask, new_tokens, sample)
+
+                    seq = self.decode_smiles(sample[0])
+                    generated.append({'sample_id': i, 'raw_tokens': sample[0][:max_length].cpu().tolist(), 'smiles': seq})
+                except Exception as e:
+                    print(f"⚠️ Error generating simple sample {i}: {e}")
+                    generated.append({'sample_id': i, 'raw_tokens': [], 'smiles': ''})
+
+        self.model.train()
+        return generated
+
+    def generate_smiles(self, num_samples: int = 10, max_length: int = 128, sampling_method: str = 'rigorous'):
+        if sampling_method == 'rigorous':
+            return self.generate_smiles_rigorous(num_samples, max_length)
+        elif sampling_method == 'simple':
+            return self.generate_smiles_simple(num_samples, max_length)
+        else:
+            raise ValueError(f"Unknown sampling method: {sampling_method}")
+
+    def generate_and_save_smiles(self, step: int, num_samples: int = 100):
+        """Generate SMILES samples using the saved checkpoint (EMA weights)."""
+        print(f"🧪 Generating {num_samples} SMILES at step {step} using checkpoint weights...")
+
+        try:
+            # Get generation parameters from config
+            sampling_method = safe_getattr(self.cfg, 'sampling.method', 'rigorous')
+            max_len = safe_getattr(self.cfg, 'data.max_smiles_len', 128)
+
+            # Switch to eval mode and use EMA weights for generation
+            self.model.eval()
+            with torch.no_grad():
+                # Store current weights and load EMA weights
+                self.ema.store(self.model.parameters())
+                self.ema.copy_to(self.model.parameters())
+
+                # Generate SMILES using the EMA weights
+                print("  Sampling in progress (this may show debug output)...")
+                generated = self.generate_smiles(num_samples, max_length=max_len, sampling_method=sampling_method)
+                print(f"  ✅ Generated {len(generated)} samples")
+
+                # Restore training weights
+                self.ema.restore(self.model.parameters())
+
+            # Switch back to training mode
+            self.model.train()
+
+            # Save generated samples to sample_dir
+            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            jsonl_path = os.path.join(self.sample_dir, f'samples_step_{step}_{timestamp}.jsonl')
+            txt_path = os.path.join(self.sample_dir, f'samples_step_{step}_{timestamp}.txt')
+
+            with open(jsonl_path, 'w') as jf, open(txt_path, 'w') as tf:
+                for rec in generated:
+                    jf.write(json.dumps(rec) + '\n')
+                    tf.write((rec.get('smiles', '') or '') + '\n')
+
+            print(f"✅ Saved {len(generated)} generated SMILES to:")
+            print(f"   JSONL: {jsonl_path}")
+            print(f"   TXT: {txt_path}")
+
+            # Log to wandb
+            wandb.log({
+                'samples/generated_count': len(generated),
+                'samples/last_file': jsonl_path,
+                'samples/method': sampling_method,
+                'samples/step': step
+            }, step=step)
+
+            return generated
+
+        except Exception as e:
+            print(f"⚠️  Error during SMILES generation at step {step}: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+
     def setup_optimizer(self):
         """Setup optimizer."""
         print("Setting up optimizer...")
@@ -282,6 +505,72 @@ class SMILESTrainer:
         
         print("Optimizer ready.")
 
+    def compute_loss(self, batch):
+        """Compute loss following the pattern from run_train_uniref50_optimized.py"""
+        # Ensure batch is 2D: [batch_size, sequence_length]
+        if batch.dim() != 2:
+            print(f"WARNING: compute_loss received {batch.dim()}D batch with shape {batch.shape}")
+            if batch.dim() > 2:
+                batch = batch.view(batch.shape[0], -1)
+                print(f"Reshaped batch to: {batch.shape}")
+            else:
+                raise ValueError(f"Batch must be at least 2D, got {batch.dim()}D with shape {batch.shape}")
+
+        # Sample timesteps
+        t = torch.rand(batch.shape[0], device=self.device) * (1 - 1e-3) + 1e-3
+        sigma, dsigma = self.noise(t)
+
+        # Sample transition (add noise to the data)
+        perturbed_batch = self.graph.sample_transition(batch, sigma)
+
+        # Validate perturbed_batch is 2D: [batch_size, sequence_length]
+        if perturbed_batch.dim() != 2:
+            raise ValueError(f"perturbed_batch must be 2D [batch_size, seq_len], got {perturbed_batch.dim()}D with shape {perturbed_batch.shape}")
+
+        # Forward pass with device-aware autocast
+        try:
+            if self.use_amp and str(self.device).split(':')[0] == 'cuda':
+                with torch.cuda.amp.autocast():
+                    log_score = self.model(perturbed_batch, sigma)
+                    loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+                    # Weight by dsigma for better training dynamics
+                    loss = (dsigma[:, None] * loss).mean()
+            else:
+                # No autocast for CPU/MPS
+                log_score = self.model(perturbed_batch, sigma)
+                loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+                # Weight by dsigma for better training dynamics
+                loss = (dsigma[:, None] * loss).mean()
+        except Exception as e:
+            if "Wrong shape" in str(e) or "einops" in str(e).lower():
+                print(f"❌ Shape error in model forward pass:")
+                print(f"   perturbed_batch shape: {perturbed_batch.shape}")
+                print(f"   sigma shape: {sigma.shape}")
+                print(f"   Error: {e}")
+
+                # Try to fix the shape issue
+                if perturbed_batch.dim() > 2:
+                    print(f"🔧 Attempting to fix perturbed_batch shape...")
+                    perturbed_batch = perturbed_batch.view(perturbed_batch.shape[0], -1)
+                    print(f"   Fixed shape: {perturbed_batch.shape}")
+
+                    # Retry the forward pass
+                    if self.use_amp and str(self.device).split(':')[0] == 'cuda':
+                        with torch.cuda.amp.autocast():
+                            log_score = self.model(perturbed_batch, sigma)
+                            loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+                            loss = (dsigma[:, None] * loss).mean()
+                    else:
+                        log_score = self.model(perturbed_batch, sigma)
+                        loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+                        loss = (dsigma[:, None] * loss).mean()
+                else:
+                    raise e
+            else:
+                raise e
+
+        return loss
+
     def train(self, project_name: str, run_name: str):
         """Main training loop for SMILES."""
         print("Starting SMILES training...")
@@ -298,8 +587,7 @@ class SMILESTrainer:
             config=self.cfg.__dict__
         )
         
-        # Build SMILES-specific loss function
-        self.loss_fn = get_smiles_loss_fn(self.noise, self.graph, train=True)
+        # Loss function will be computed inline using compute_loss method
         
         # Training loop
         step = 0
@@ -307,20 +595,34 @@ class SMILESTrainer:
         
         for epoch in range(self.cfg.training.epochs):
             self.model.train()
-            
-            for batch_idx, batch in enumerate(tqdm(self.train_loader, desc=f"Epoch {epoch}")):
+            # Track running loss for the epoch
+            running_loss = 0.0
+            running_batches = 0
+
+            for batch in tqdm(self.train_loader, desc=f"Epoch {epoch}"):
                 if step >= max_steps:
                     print(f"Reached max steps: {max_steps}")
                     return
                 
                 batch = batch.to(self.device)
-                
-                # Forward pass with fixed autocast
-                if self.use_amp:
-                    with torch.amp.autocast('cuda'):
-                        loss = self.loss_fn(self.model, batch)
-                else:
-                    loss = self.loss_fn(self.model, batch)
+                #print(batch[0])
+
+                # Ensure batch is 2D: [batch_size, sequence_length]
+                if batch.dim() > 2:
+                    print(f"WARNING: Batch has {batch.dim()} dimensions, reshaping from {batch.shape}")
+                    batch = batch.view(batch.shape[0], -1)
+                    print(f"Reshaped batch to: {batch.shape}")
+
+                # Compute loss using the inline method
+                loss = self.compute_loss(batch) / self.cfg.training.accum
+
+                # Accumulate for epoch statistics (use un-reduced scalar)
+                try:
+                    running_loss += loss.item()
+                except Exception:
+                    # If loss is a tensor requiring grad, detach then convert
+                    running_loss += loss.detach().cpu().item()
+                running_batches += 1
                 
                 # Backward pass
                 self.optimizer.zero_grad()
@@ -334,24 +636,94 @@ class SMILESTrainer:
                     self.optimizer.step()
                 
                 # Update EMA and scheduler
-                self.ema.update()
+                self.ema.update(self.model.parameters())
                 self.scheduler.step()
                 
                 # Logging
-                if step % 100 == 0:
+                if step % 1000 == 0:
                     wandb.log({
                         'train/loss': loss.item(),
                         'train/lr': self.scheduler.get_last_lr()[0],
                         'train/step': step,
                         'train/epoch': epoch
                     })
+
+                    print(f"Step {step}, Loss: {loss.item():.6f}")
                 
-                # Save checkpoint
-                if step % 5000 == 0:
+                # Save checkpoint and generate SMILES
+                if step % 10000 == 0:
                     self.save_checkpoint(step)
+                    self.generate_and_save_smiles(step)
                 
                 step += 1
-        
+            # End of epoch: compute and log epoch-level training loss
+            if running_batches > 0:
+                epoch_train_loss = running_loss / running_batches
+            else:
+                epoch_train_loss = float('nan')
+
+            # Run validation pass
+            epoch_val_loss = None
+            if hasattr(self, 'val_loader'):
+                self.model.eval()
+                val_running = 0.0
+                val_batches = 0
+                with torch.no_grad():
+                    for vbatch in self.val_loader:
+                        vbatch = vbatch.to(self.device)
+                        if vbatch.dim() > 2:
+                            vbatch = vbatch.view(vbatch.shape[0], -1)
+                        vloss = self.compute_loss(vbatch)
+                        try:
+                            val_running += vloss.item()
+                        except Exception:
+                            val_running += vloss.detach().cpu().item()
+                        val_batches += 1
+
+                if val_batches > 0:
+                    epoch_val_loss = val_running / val_batches
+                else:
+                    epoch_val_loss = float('nan')
+
+                # Return to train mode for next epoch
+                self.model.train()
+
+            # Log epoch-level metrics to wandb and stdout
+            wandb.log({
+                'train/epoch_loss': epoch_train_loss,
+                'train/epoch': epoch,
+            })
+            if epoch_val_loss is not None:
+                wandb.log({'val/loss': epoch_val_loss, 'val/epoch': epoch})
+
+            print(f"Epoch {epoch} summary: train_loss={epoch_train_loss:.6f}, val_loss={epoch_val_loss}")
+
+            # ---------------- Generate SMILES at epoch end ----------------
+            try:
+                num_gen = 100
+                sampling_method = safe_getattr(self.cfg, 'sampling.method', 'rigorous')
+                max_len = safe_getattr(self.cfg, 'data.max_smiles_len', 128)
+
+                generated = self.generate_smiles(num_gen, max_length=max_len, sampling_method=sampling_method)
+
+                # Save generated samples to sample_dir
+                timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                jsonl_path = os.path.join(self.sample_dir, f'samples_epoch_{epoch}_{timestamp}.jsonl')
+                txt_path = os.path.join(self.sample_dir, f'samples_epoch_{epoch}_{timestamp}.txt')
+
+                with open(jsonl_path, 'w') as jf, open(txt_path, 'w') as tf:
+                    for rec in generated:
+                        jf.write(json.dumps(rec) + '\n')
+                        tf.write((rec.get('smiles', '') or '') + '\n')
+
+                print(f"Saved {len(generated)} generated SMILES to: {jsonl_path} and {txt_path}")
+
+                # Log example and count to wandb
+                wandb.log({'samples/generated_count': len(generated), 'samples/last_file': jsonl_path, 'samples/method': sampling_method}, step=step)
+
+            except Exception as e:
+                print(f"⚠️  Error during SMILES generation at epoch end: {e}")
+
         wandb.finish()
         print("Training completed!")
 

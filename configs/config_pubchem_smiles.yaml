@@ -26,9 +26,9 @@ ngpus: 1
 tokens: 2364             # SMILES vocabulary size from MoLFormer
 
 training:
-  batch_size: 16
+  batch_size: 4
   accum: 4
-  epochs: 50
+  epochs: 3
   max_samples: 10000000
   num_workers: 4
   seed: 42
