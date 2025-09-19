@@ -37,8 +37,8 @@ class HyperparameterSweep:
         return {
             # Model architecture parameters - FIXED: Ensure hidden_size is divisible by n_heads
             'model.hidden_size': [512, 768, 1024],
-            'model.n_heads': [8, 16],  # FIXED: Removed 12 to avoid dimension mismatch
-            'model.n_blocks_prot': [6, 8, 12],
+            'model.n_heads': [8, 16, 32],  # FIXED: Removed 12 to avoid dimension mismatch
+            'model.n_blocks_prot': [6, 8, 12, 16],
             'model.dropout': [0.1, 0.15, 0.2],
             'model.cond_dim': [128, 256, 512],
             
@@ -156,8 +156,8 @@ class HyperparameterSweep:
             {
                 'name': 'large_quality',
                 'model.hidden_size': 1024,
-                'model.n_heads': 16,
-                'model.n_blocks_prot': 12,
+                'model.n_heads': 32,
+                'model.n_blocks_prot': 16,
                 'model.dropout': 0.1,
                 'model.cond_dim': 512,
                 'training.batch_size': 16,

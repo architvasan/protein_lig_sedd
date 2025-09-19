@@ -26,7 +26,7 @@ training:
   batch_size: 32        # Increased batch size for better gradient estimates
   accum: 4              # Gradient accumulation for effective batch size of 128
   epochs: 2
-  max_samples: 50000000  # Large dataset
+  max_samples: 50000  # Large dataset
   num_workers: 4        # More workers for data loading
   seed: 42
   force_reprocess: False

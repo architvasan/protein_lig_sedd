@@ -6,7 +6,7 @@
 set -e
 
 # Default values
-BASE_CONFIG="configs/config_uniref50_optimized.yaml"
+BASE_CONFIG="configs/config_uniref50_sweeps.yaml"
 WORK_DIR="./hyperparam_experiments"
 DATAFILE="./input_data/subset_uniref50.pt"
 SWEEP_TYPE="predefined"
