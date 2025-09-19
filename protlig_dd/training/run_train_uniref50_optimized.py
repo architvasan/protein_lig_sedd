@@ -972,7 +972,7 @@ class OptimizedUniRef50Trainer:
         try:
             # 1. Validation loss
             print("📊 Computing validation loss...")
-            val_loss, recon_loss = self.validate_model()
+            val_loss, recon_loss, fixed_noise_metrics = self.validate_model()
 
             # 2. Generate sequences using specified method
             print(f"🧬 Generating protein sequences using {sampling_method} method...")
@@ -1025,6 +1025,11 @@ class OptimizedUniRef50Trainer:
             # Add reconstruction loss if available
             if recon_loss is not None:
                 wandb_metrics['eval/reconstruction_loss'] = recon_loss
+
+            # Add fixed noise level metrics
+            for noise_key, noise_value in fixed_noise_metrics.items():
+                if noise_value is not None:
+                    wandb_metrics[f'eval/{noise_key}'] = noise_value
 
             # Generation quality metrics
             if 'error' not in properties:
@@ -1095,6 +1100,15 @@ class OptimizedUniRef50Trainer:
             print(f"   Validation Loss: {val_loss:.4f}")
             if recon_loss is not None:
                 print(f"   Reconstruction Loss: {recon_loss:.4f}")
+
+            # Print fixed noise level results
+            if fixed_noise_metrics:
+                print(f"   Fixed Noise Levels:")
+                for noise_key, noise_value in sorted(fixed_noise_metrics.items()):
+                    if noise_value is not None:
+                        noise_level = noise_key.replace('fixed_noise_', '')
+                        print(f"     σ={noise_level}: {noise_value:.4f}")
+
             if 'error' not in properties:
                 print(f"   Generated Sequences: {properties['num_sequences']}")
                 print(f"   Avg Length: {properties['summary']['avg_length']:.1f} ± {properties['summary']['std_length']:.1f}")
@@ -1416,23 +1430,20 @@ class OptimizedUniRef50Trainer:
         return loss.item() * self.cfg.training.accum, step_time, additional_metrics
 
     def eval_reconstruction_loss(self, batch):
-        """Evaluate model at t=0 (no noise) - pure reconstruction task."""
+        """Evaluate model at t=0 (no noise) - pure reconstruction task using proper score entropy."""
         try:
-            # Set t=0 (no noise condition)
-            t = torch.zeros(batch.shape[0], device=self.device)
-
-            # For SEDD models, sigma=0 means no noise
+            # Set sigma=0 (no noise condition)
             sigma = torch.zeros(batch.shape[0], device=self.device)
 
-            # Forward pass with no noise
-            logits = self.model(batch, sigma)
+            # Forward pass with no noise - get score
+            score = self.model(batch, sigma)
 
-            # Reconstruction loss - model should predict original sequence
-            recon_loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                batch.view(-1),
-                ignore_index=1  # Ignore padding
-            )
+            # Use the graph's score_entropy method for proper loss computation
+            # For reconstruction: x (noisy) = x0 (clean) since sigma=0
+            entropy = self.graph.score_entropy(score, sigma, batch, batch)
+
+            # Return mean entropy as reconstruction loss
+            recon_loss = entropy.mean()
 
             return recon_loss.item()
 
@@ -1440,11 +1451,43 @@ class OptimizedUniRef50Trainer:
             print(f"Warning: Could not compute reconstruction loss: {e}")
             return None
 
+    def eval_fixed_noise_levels(self, batch):
+        """Evaluate at specific noise levels regardless of curriculum using proper score entropy."""
+        try:
+            results = {}
+            # Fixed noise levels to always test (independent of curriculum)
+            fixed_levels = [0.1, 0.3, 0.5, 0.7, 0.9]
+
+            for noise_level in fixed_levels:
+                # Create sigma tensor for this noise level
+                sigma = torch.full((batch.shape[0],), noise_level, device=self.device)
+
+                # Sample noisy version at this noise level
+                x_noisy = self.graph.sample(batch, sigma)
+
+                # Forward pass at this specific noise level - get score
+                score = self.model(x_noisy, sigma)
+
+                # Use proper score entropy for loss computation
+                entropy = self.graph.score_entropy(score, sigma, x_noisy, batch)
+
+                # Mean entropy as loss
+                loss = entropy.mean()
+
+                results[f'fixed_noise_{noise_level}'] = loss.item()
+
+            return results
+
+        except Exception as e:
+            print(f"Warning: Could not compute fixed noise level evaluation: {e}")
+            return {}
+
     def validate_model(self):
-        """Run validation and return metrics including reconstruction loss."""
+        """Run validation and return metrics including reconstruction and fixed noise losses."""
         self.model.eval()
         val_losses = []
         recon_losses = []
+        fixed_noise_metrics = {}
 
         with torch.no_grad():
             for i, batch in enumerate(self.val_loader):
@@ -1478,13 +1521,26 @@ class OptimizedUniRef50Trainer:
                 if recon_loss is not None:
                     recon_losses.append(recon_loss)
 
+                # 3. Fixed noise level evaluation (curriculum-agnostic)
+                if i == 0:  # Only compute on first batch for speed
+                    batch_fixed_noise = self.eval_fixed_noise_levels(batch)
+                    for key, value in batch_fixed_noise.items():
+                        if key not in fixed_noise_metrics:
+                            fixed_noise_metrics[key] = []
+                        fixed_noise_metrics[key].append(value)
+
         self.model.train()
 
-        # Return both standard validation loss and reconstruction loss
+        # Average all metrics
         avg_val_loss = np.mean(val_losses) if val_losses else float('inf')
         avg_recon_loss = np.mean(recon_losses) if recon_losses else None
 
-        return avg_val_loss, avg_recon_loss
+        # Average fixed noise metrics
+        avg_fixed_noise = {}
+        for key, values in fixed_noise_metrics.items():
+            avg_fixed_noise[key] = np.mean(values) if values else None
+
+        return avg_val_loss, avg_recon_loss, avg_fixed_noise
     
     def save_checkpoint(self, step, epoch=0, best_loss=float('inf'), is_best=False):
         """Save training checkpoint."""
