@@ -418,7 +418,7 @@ class OptimizedUniRef50Trainer:
 
         wandb.log(metrics, step=step)
 
-    def log_validation_metrics(self, step: int, val_loss: float, perplexity: float = None):
+    def log_validation_metrics(self, step: int, val_loss: float, perplexity: float = None, recon_loss: float = None):
         """Log validation metrics to Wandb."""
         metrics = {
             'val/loss': val_loss,
@@ -427,6 +427,9 @@ class OptimizedUniRef50Trainer:
 
         if perplexity is not None:
             metrics['val/perplexity'] = perplexity
+
+        if recon_loss is not None:
+            metrics['val/reconstruction_loss'] = recon_loss
 
         wandb.log(metrics, step=step)
 
@@ -969,7 +972,7 @@ class OptimizedUniRef50Trainer:
         try:
             # 1. Validation loss
             print("📊 Computing validation loss...")
-            val_loss = self.validate_model()
+            val_loss, recon_loss = self.validate_model()
 
             # 2. Generate sequences using specified method
             print(f"🧬 Generating protein sequences using {sampling_method} method...")
@@ -1018,6 +1021,10 @@ class OptimizedUniRef50Trainer:
                 'eval/step': step,
                 'eval/epoch': epoch,
             }
+
+            # Add reconstruction loss if available
+            if recon_loss is not None:
+                wandb_metrics['eval/reconstruction_loss'] = recon_loss
 
             # Generation quality metrics
             if 'error' not in properties:
@@ -1086,6 +1093,8 @@ class OptimizedUniRef50Trainer:
             # 7. Print summary
             print(f"\n📋 EVALUATION SUMMARY:")
             print(f"   Validation Loss: {val_loss:.4f}")
+            if recon_loss is not None:
+                print(f"   Reconstruction Loss: {recon_loss:.4f}")
             if 'error' not in properties:
                 print(f"   Generated Sequences: {properties['num_sequences']}")
                 print(f"   Avg Length: {properties['summary']['avg_length']:.1f} ± {properties['summary']['std_length']:.1f}")
@@ -1406,10 +1415,36 @@ class OptimizedUniRef50Trainer:
 
         return loss.item() * self.cfg.training.accum, step_time, additional_metrics
 
+    def eval_reconstruction_loss(self, batch):
+        """Evaluate model at t=0 (no noise) - pure reconstruction task."""
+        try:
+            # Set t=0 (no noise condition)
+            t = torch.zeros(batch.shape[0], device=self.device)
+
+            # For SEDD models, sigma=0 means no noise
+            sigma = torch.zeros(batch.shape[0], device=self.device)
+
+            # Forward pass with no noise
+            logits = self.model(batch, sigma)
+
+            # Reconstruction loss - model should predict original sequence
+            recon_loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                batch.view(-1),
+                ignore_index=1  # Ignore padding
+            )
+
+            return recon_loss.item()
+
+        except Exception as e:
+            print(f"Warning: Could not compute reconstruction loss: {e}")
+            return None
+
     def validate_model(self):
-        """Run validation and return metrics."""
+        """Run validation and return metrics including reconstruction loss."""
         self.model.eval()
         val_losses = []
+        recon_losses = []
 
         with torch.no_grad():
             for i, batch in enumerate(self.val_loader):
@@ -1418,7 +1453,7 @@ class OptimizedUniRef50Trainer:
 
                 batch = batch.to(self.device)
 
-                # Simple validation loss computation (without state dependency)
+                # 1. Standard validation loss computation
                 try:
                     loss = self.compute_loss(batch)
                     val_losses.append(loss.item())
@@ -1438,8 +1473,18 @@ class OptimizedUniRef50Trainer:
                     )
                     val_losses.append(loss.item())
 
+                # 2. Reconstruction loss (noise-agnostic metric)
+                recon_loss = self.eval_reconstruction_loss(batch)
+                if recon_loss is not None:
+                    recon_losses.append(recon_loss)
+
         self.model.train()
-        return np.mean(val_losses) if val_losses else float('inf')
+
+        # Return both standard validation loss and reconstruction loss
+        avg_val_loss = np.mean(val_losses) if val_losses else float('inf')
+        avg_recon_loss = np.mean(recon_losses) if recon_losses else None
+
+        return avg_val_loss, avg_recon_loss
     
     def save_checkpoint(self, step, epoch=0, best_loss=float('inf'), is_best=False):
         """Save training checkpoint."""
