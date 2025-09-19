@@ -597,11 +597,11 @@ class SEDD(nn.Module, PyTorchModelHubMixin):
 
         # Handle absorbing state (zero out positions that match input indices)
         # TODO: Fix scatter operation - temporarily disabled for testing
-        # if self.absorb:
-        #     # Ensure tensors are on the same device and have compatible shapes
-        #     with torch.cuda.amp.autocast(enabled=False):
-        #         indices_expanded = indices.unsqueeze(-1)  # [batch, seq, 1]
-        #         zeros = torch.zeros_like(x[..., :1])  # [batch, seq, 1]
-        #         x = torch.scatter(x, -1, indices_expanded, zeros)
+        if self.absorb:
+             # Ensure tensors are on the same device and have compatible shapes
+             with torch.cuda.amp.autocast(enabled=False):
+                 indices_expanded = indices.unsqueeze(-1)  # [batch, seq, 1]
+                 zeros = torch.zeros_like(x[..., :1])  # [batch, seq, 1]
+                 x = torch.scatter(x, -1, indices_expanded, zeros)
 
         return x
