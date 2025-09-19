@@ -55,7 +55,7 @@ class HyperparameterSweep:
             'optim.grad_clip': [0.5, 1.0, 2.0],
             
             # Noise schedule parameters
-            'noise.type': ['cosine', 'linear'],
+            'noise.type': ['cosine', 'loglinear'],
             'noise.sigma_max': [0.5, 0.8, 1.0],
             'noise.eps': [0.02, 0.05, 0.1],
             
@@ -65,11 +65,11 @@ class HyperparameterSweep:
             
             # Data parameters
             'data.max_protein_len': [512],
-            'data.train_ratio': [0.9, 0.95],
+            'data.train_ratio': [0.9],
             
             # Curriculum learning
             'curriculum.enabled': [True, False],
-            'curriculum.preschool_time': [5000, 10000, 20000],
+            'curriculum.preschool_time': [500, 5000, 10000, 20000],
             
             # System parameters
             'sampling_method': ['rigorous'],
