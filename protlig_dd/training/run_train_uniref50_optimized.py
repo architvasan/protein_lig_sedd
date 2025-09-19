@@ -1025,11 +1025,21 @@ class OptimizedUniRef50Trainer:
             # Add reconstruction loss if available
             if recon_loss is not None:
                 wandb_metrics['eval/reconstruction_loss'] = recon_loss
+                print(f"   📊 Reconstruction Loss: {recon_loss:.4f}")
+            else:
+                print("   ⚠️  Reconstruction loss is None")
 
             # Add fixed noise level metrics
-            for noise_key, noise_value in fixed_noise_metrics.items():
-                if noise_value is not None:
-                    wandb_metrics[f'eval/{noise_key}'] = noise_value
+            if fixed_noise_metrics:
+                print(f"   📊 Fixed Noise Metrics: {len(fixed_noise_metrics)} levels")
+                for noise_key, noise_value in fixed_noise_metrics.items():
+                    if noise_value is not None:
+                        wandb_metrics[f'eval/{noise_key}'] = noise_value
+                        print(f"      {noise_key}: {noise_value:.4f}")
+                    else:
+                        print(f"      {noise_key}: None (skipped)")
+            else:
+                print("   ⚠️  No fixed noise metrics computed")
 
             # Generation quality metrics
             if 'error' not in properties:
@@ -1432,6 +1442,11 @@ class OptimizedUniRef50Trainer:
     def eval_reconstruction_loss(self, batch):
         """Evaluate model at t=0 (no noise) - pure reconstruction task using proper score entropy."""
         try:
+            # Check if graph exists
+            if not hasattr(self, 'graph') or self.graph is None:
+                print("Warning: No graph object found, cannot compute reconstruction loss")
+                return None
+
             # Set sigma=0 (no noise condition)
             sigma = torch.zeros(batch.shape[0], device=self.device)
 
@@ -1449,13 +1464,20 @@ class OptimizedUniRef50Trainer:
 
         except Exception as e:
             print(f"Warning: Could not compute reconstruction loss: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def eval_fixed_noise_levels(self, batch):
         """Evaluate at specific noise levels regardless of curriculum using proper score entropy."""
         try:
+            # Check if graph exists
+            if not hasattr(self, 'graph') or self.graph is None:
+                print("Warning: No graph object found, cannot compute fixed noise evaluation")
+                return {}
+
             results = {}
-            # Fixed noise levels to always test (independent of curriculum)
+            # Fixed noise levels to test across full training range (sigma_max=0.9)
             fixed_levels = [0.1, 0.3, 0.5, 0.7, 0.9]
 
             for noise_level in fixed_levels:
@@ -1480,6 +1502,8 @@ class OptimizedUniRef50Trainer:
 
         except Exception as e:
             print(f"Warning: Could not compute fixed noise level evaluation: {e}")
+            import traceback
+            traceback.print_exc()
             return {}
 
     def validate_model(self):
