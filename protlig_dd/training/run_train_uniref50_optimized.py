@@ -685,7 +685,7 @@ class OptimizedUniRef50Trainer:
         else:
             raise ValueError(f"Unknown sampling method: {sampling_method}. Use 'rigorous' or 'simple'.")
 
-    def quick_generation_test(self, step: int, epoch: int, num_samples: int = 3, max_length: int = None):
+    def quick_generation_test(self, step: int, epoch: int, num_samples: int = 3, max_length: int = 128):
         """Quick generation test during training to monitor generation quality."""
         # Use same max length as training data if not specified
         if max_length is None:

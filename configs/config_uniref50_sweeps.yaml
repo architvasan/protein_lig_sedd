@@ -1,0 +1,113 @@
+work_dir: /Users/ramanathana/Work/Protein-Ligand-SEDD/protein_lig_sedd
+
+model:
+  name: medium           
+  type: ddit
+  hidden_size: 768  # Reduced from 1024 for better memory efficiency
+  cond_dim: 256     # Increased conditioning capacity
+  length: 512       # Reasonable sequence length for UniRef50
+  n_blocks_prot: 8  # Reduced depth for faster training
+  n_blocks_lig: 8
+  n_heads: 12       # Good balance of capacity and efficiency
+  scale_by_sigma: True
+  dropout: 0.15     # Slightly higher dropout for regularization
+  esm_dim: 640
+  molformer_dim: 768
+  device: cuda:0
+
+defaults:
+  - _self_
+  - model: medium
+
+ngpus: 1
+tokens: 36  # Protein vocabulary size
+
+training:
+  batch_size: 32        # Increased batch size for better gradient estimates
+  accum: 4              # Gradient accumulation for effective batch size of 128
+  epochs: 2
+  max_samples: 50000000  # Large dataset
+  num_workers: 4        # More workers for data loading
+  seed: 42
+  force_reprocess: False
+  n_iters: 500000       # Reasonable number of iterations
+  snapshot_freq: 1000   # Less frequent checkpointing
+  log_freq: 100
+  eval_freq: 2000       # Less frequent evaluation
+  snapshot_freq_for_preemption: 1000
+  weight: standard
+  snapshot_sampling: True
+  ema: 0.999            # Slightly less aggressive EMA
+  task: protein_only    # Focus on protein-only training first
+
+data:
+  train: uniref50
+  valid: uniref50
+  cache_dir: data
+  train_ratio: 0.95     # Use more data for training
+  val_ratio: 0.05
+  max_protein_len: 512  # Reasonable length for UniRef50
+  max_ligand_len: 128
+  use_structure: False
+  vocab_size_protein: 36
+  vocab_size_ligand: 2364
+
+graph:
+  type: absorb
+  file: data
+  report_all: False
+
+noise:
+  type: cosine          # Cosine schedule often works better for long training
+  sigma_min: !!float "1e-4"  # Less aggressive minimum
+  sigma_max: 0.8        # Less aggressive maximum
+  eps: !!float "0.05"   # Adjusted epsilon
+
+sampling:
+  predictor: euler
+  steps: 100            # More steps for better quality
+  noise_removal: True
+
+eval:
+  batch_size: 16        # Smaller eval batch size
+  perplexity: True
+  perplexity_batch_size: 8
+
+optim:
+  weight_decay: 0.01    # Add weight decay for regularization
+  optimizer: AdamW
+  lr: !!float "1e-4"    # Conservative learning rate
+  beta1: 0.9
+  beta2: 0.95           # Adjusted beta2 for better long-term training
+  eps: !!float "1e-8"
+  warmup: 5000          # Longer warmup for large dataset
+  grad_clip: 1.0
+
+# Learning rate schedule configuration
+lr_schedule:
+  type: cosine_with_warmup
+  warmup_steps: 5000
+  max_steps: 500000
+  min_lr_ratio: 0.1
+
+# Curriculum learning configuration
+curriculum:
+  enabled: True
+  preschool_time: 5000  # Faster ramp-up
+  difficulty_ramp: exponential  # More aggressive difficulty increase
+
+# Memory optimization
+memory:
+  gradient_checkpointing: True
+  mixed_precision: True
+  max_memory_per_gpu: 0.9
+
+# Monitoring and debugging
+monitoring:
+  log_gradients: True
+  log_weights: False
+  sample_frequency: 5000
+  
+hydra:
+  run:
+    dir: exp_local/uniref50/${now:%Y.%m.%d}/${now:%H%M%S}
