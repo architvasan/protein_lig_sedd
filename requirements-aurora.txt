@@ -1,12 +1,33 @@
 # Requirements for Aurora (Intel XPU) training
 # Install base requirements first: pip install -r requirements.txt
 
+pyyaml>=6.0
+wandb>=0.15.0
+biotite>=0.37.0  # For protein structure analysis
+biopython>=1.81  # For bioinformatics utilities
+fair-esm>=2.0.0
+
+dataclasses-json>=0.5.0
+tqdm>=4.65.0
+click>=8.1.0
+
+# Visualization and Plotting
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.14.0
+
+# Development and Testing (Optional)
+pytest>=7.3.0
+pytest-cov>=4.1.0
+black>=23.3.0
+flake8>=6.0.0
+
 # Intel XPU specific packages
-intel-extension-for-pytorch>=2.0.0
-oneccl_bindings_for_pytorch>=2.0.0
+#intel-extension-for-pytorch>=2.0.0
+#oneccl_bindings_for_pytorch>=2.0.0
 
 # MPI for distributed training on Aurora
-mpi4py>=3.1.0
+#mpi4py>=3.1.0
 
 # Additional HPC utilities
 psutil>=5.9.0
