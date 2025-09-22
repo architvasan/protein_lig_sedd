@@ -3,7 +3,11 @@ Optimized training script for UniRef50 with improved stability and efficiency.
 """
 import torch
 ### Import intel_extension_for_pytorch for running on aurora
-import intel_extension_for_pytorch as ipex
+try:
+    import intel_extension_for_pytorch as ipex
+    import oneccl_bindings_for_pytorch as torch_ccl
+except:
+    print("intel_extension_for_pytorch not found, running on CPU/cuda")
 import datetime
 import os
 import sys
@@ -37,7 +41,6 @@ from protlig_dd.model.ema import ExponentialMovingAverage
 from protlig_dd.utils.lr_scheduler import WarmupCosineLR
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
-import oneccl_bindings_for_pytorch as torch_ccl
 ### Import torch.distributed for running on aurora
 import torch.distributed as dist
 
