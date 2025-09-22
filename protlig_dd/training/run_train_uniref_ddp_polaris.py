@@ -24,6 +24,9 @@ import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import json
+from collections import OrderedDict
+from transformers import GPT2TokenizerFast
 import yaml
 from dataclasses import dataclass
 from typing import Optional
@@ -58,20 +61,295 @@ def setup_ddp_polaris(rank, world_size):
     device_id = rank % torch.cuda.device_count()
     return rank, device_id
 
-class UniRef50Dataset(torch.utils.data.Dataset):
-    """Dataset class for processed UniRef50 data."""
+class ProteinTokenizer:
+    """Protein tokenizer based on the download script."""
 
-    def __init__(self, data_file):
-        self.data = torch.load(data_file, weights_only=False)
-        print(f"Loaded {len(self.data)} sequences from {data_file}")
+    def __init__(self, vocab_file=None, merges_file=None):
+        self.amino_acids = list("ACDEFGHIKLMNPQRSTVWY")
+        self.special_tokens = ["<s>", "<pad>", "</s>", "<unk>", "<mask>"]
+
+        if vocab_file and merges_file:
+            # Load existing tokenizer
+            self.tokenizer = GPT2TokenizerFast(
+                vocab_file=vocab_file,
+                merges_file=merges_file,
+                bos_token='<s>',
+                eos_token='</s>',
+                unk_token='<unk>',
+                pad_token='<pad>',
+                mask_token='<mask>'
+            )
+        else:
+            # Create new tokenizer
+            self.tokenizer = self._create_tokenizer()
+
+    def _create_tokenizer(self):
+        """Create protein tokenizer."""
+        all_tokens = self.special_tokens + self.amino_acids
+        vocab = OrderedDict((token, idx) for idx, token in enumerate(all_tokens))
+
+        # Create temporary files
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(vocab, f)
+            vocab_file = f.name
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            f.write('#version: 0.2\n')
+            merges_file = f.name
+
+        tokenizer = GPT2TokenizerFast(
+            vocab_file=vocab_file,
+            merges_file=merges_file,
+            bos_token='<s>',
+            eos_token='</s>',
+            unk_token='<unk>',
+            pad_token='<pad>',
+            mask_token='<mask>'
+        )
+
+        # Clean up temp files
+        os.unlink(vocab_file)
+        os.unlink(merges_file)
+
+        return tokenizer
+
+    def tokenize_sequence(self, sequence, max_length=512):
+        """Tokenize a single protein sequence."""
+        # Truncate if needed
+        if len(sequence) > max_length - 2:
+            sequence = sequence[:max_length - 2]
+
+        # Tokenize
+        tokens = self.tokenizer.encode(sequence, add_special_tokens=True)
+
+        # Pad
+        if len(tokens) < max_length:
+            tokens.extend([self.tokenizer.pad_token_id] * (max_length - len(tokens)))
+
+        return torch.tensor(tokens, dtype=torch.long)
+
+
+class UniRef50Dataset(torch.utils.data.Dataset):
+    """Dataset class for processed UniRef50 data - supports both tokenized and untokenized data."""
+
+    def __init__(self, data_file, tokenize_on_fly=False, max_length=512, use_streaming=False):
+        self.data_file = data_file
+        self.tokenize_on_fly = tokenize_on_fly
+        self.max_length = max_length
+        self.use_streaming = use_streaming
+
+        if use_streaming:
+            print(f"🌊 Using streaming mode for large file: {data_file}")
+            # For streaming, we need to get the length without loading all data
+            self._get_streaming_info()
+        else:
+            # Try memory mapping first for large files
+            file_size_gb = os.path.getsize(data_file) / (1024**3)
+            if file_size_gb > 50:  # If file is larger than 50GB
+                print(f"📁 Large file detected ({file_size_gb:.1f}GB). Using memory mapping...")
+                try:
+                    self.data = torch.load(data_file, weights_only=False, map_location='cpu', mmap=True)
+                except Exception as e:
+                    print(f"⚠️  Memory mapping failed: {e}")
+                    print("🌊 Falling back to streaming mode...")
+                    self.use_streaming = True
+                    self._get_streaming_info()
+                    return
+            else:
+                print(f"📁 Loading file ({file_size_gb:.1f}GB) into memory...")
+                self.data = torch.load(data_file, weights_only=False)
+
+        if not self.use_streaming:
+            self._check_tokenization_format()
+
+    def _get_streaming_info(self):
+        """Get dataset info for streaming mode without loading all data."""
+        print("🔍 Analyzing file structure for streaming...")
+
+        # Load just a small sample to understand the format
+        try:
+            # Try to load just the first few items
+            sample_data = []
+            with open(self.data_file, 'rb') as f:
+                import pickle
+                try:
+                    # Try to load incrementally
+                    for i in range(min(10, 1000)):  # Load first 10 items for analysis
+                        try:
+                            item = pickle.load(f)
+                            sample_data.append(item)
+                        except EOFError:
+                            break
+                except:
+                    # If incremental loading fails, try loading the whole thing and take a sample
+                    f.seek(0)
+                    full_data = pickle.load(f)
+                    if isinstance(full_data, list) and len(full_data) > 0:
+                        sample_data = full_data[:10]
+                        self.total_length = len(full_data)
+                        print(f"📊 Detected {self.total_length} total sequences")
+                    else:
+                        raise ValueError("Unknown data format for streaming")
+
+            if sample_data:
+                self.sample_data = sample_data
+                self._check_tokenization_format_streaming(sample_data)
+                if not hasattr(self, 'total_length'):
+                    # If we couldn't get total length, we'll need to count
+                    print("⚠️  Could not determine total length. Will count during training.")
+                    self.total_length = None
+            else:
+                raise ValueError("Could not load any sample data")
+
+        except Exception as e:
+            print(f"❌ Error setting up streaming: {e}")
+            raise ValueError(f"Cannot setup streaming for file {self.data_file}: {e}")
+
+    def _check_tokenization_format_streaming(self, sample_data):
+        """Check tokenization format for streaming mode."""
+        if len(sample_data) > 0:
+            sample = sample_data[0]
+            if isinstance(sample, dict) and 'prot_tokens' in sample:
+                self.is_tokenized = True
+                print(f"✅ Detected pre-tokenized data (streaming mode)")
+            elif isinstance(sample, dict) and ('protein_seq' in sample or 'sequence' in sample):
+                self.is_tokenized = False
+                print(f"✅ Detected untokenized data (streaming mode)")
+                if self.tokenize_on_fly:
+                    self.tokenizer = ProteinTokenizer()
+                    print("✅ Tokenizer initialized for streaming")
+            elif isinstance(sample, str):
+                self.is_tokenized = False
+                print(f"✅ Detected raw sequence strings (streaming mode)")
+                if self.tokenize_on_fly:
+                    self.tokenizer = ProteinTokenizer()
+                    print("✅ Tokenizer initialized for streaming")
+            else:
+                raise ValueError(f"Unknown data format in streaming mode: {type(sample)}")
+
+    def _check_tokenization_format(self):
+        """Check tokenization format for regular mode."""
+        # Check if data is already tokenized
+        if len(self.data) > 0:
+            sample = self.data[0]
+            if isinstance(sample, dict) and 'prot_tokens' in sample:
+                self.is_tokenized = True
+                print(f"Loaded {len(self.data)} pre-tokenized sequences from {self.data_file}")
+            elif isinstance(sample, dict) and ('protein_seq' in sample or 'sequence' in sample):
+                self.is_tokenized = False
+                print(f"Loaded {len(self.data)} untokenized sequences from {self.data_file}")
+                if self.tokenize_on_fly:
+                    self.tokenizer = ProteinTokenizer()
+                    print("✅ Tokenizer initialized for on-the-fly tokenization")
+            elif isinstance(sample, str):
+                self.is_tokenized = False
+                print(f"Loaded {len(self.data)} raw sequence strings from {self.data_file}")
+                if self.tokenize_on_fly:
+                    self.tokenizer = ProteinTokenizer()
+                    print("✅ Tokenizer initialized for on-the-fly tokenization")
+            else:
+                raise ValueError(f"Unknown data format in {self.data_file}. Expected dict with 'prot_tokens' or 'protein_seq'/'sequence', or raw strings.")
+        else:
+            raise ValueError(f"Empty dataset loaded from {self.data_file}")
 
     def __len__(self):
-        return len(self.data)
+        if self.use_streaming:
+            if self.total_length is not None:
+                return self.total_length
+            else:
+                # If we don't know the length, we need to count (expensive)
+                print("⚠️  Counting sequences in large file (this may take a while)...")
+                count = 0
+                try:
+                    with open(self.data_file, 'rb') as f:
+                        import pickle
+                        data = pickle.load(f)
+                        if isinstance(data, list):
+                            count = len(data)
+                        else:
+                            count = 1
+                    self.total_length = count
+                    return count
+                except Exception as e:
+                    print(f"❌ Error counting sequences: {e}")
+                    return 1000000  # Fallback estimate
+        else:
+            return len(self.data)
 
     def __getitem__(self, idx):
-        sample = self.data[idx]
-        # Return the tokenized protein sequence
-        return sample['prot_tokens']
+        if self.use_streaming:
+            return self._get_streaming_item(idx)
+        else:
+            sample = self.data[idx]
+
+            if self.is_tokenized:
+                # Return pre-tokenized data
+                return sample['prot_tokens']
+            else:
+                # Handle untokenized data
+                if not self.tokenize_on_fly:
+                    raise ValueError("Data is not tokenized but tokenize_on_fly=False. Set tokenize_on_fly=True or use pre-tokenized data.")
+
+                # Extract sequence
+                if isinstance(sample, dict):
+                    if 'protein_seq' in sample:
+                        sequence = sample['protein_seq']
+                    elif 'sequence' in sample:
+                        sequence = sample['sequence']
+                    else:
+                        raise ValueError(f"Dict sample missing 'protein_seq' or 'sequence' key: {list(sample.keys())}")
+                elif isinstance(sample, str):
+                    sequence = sample
+                else:
+                    raise ValueError(f"Unknown sample type: {type(sample)}")
+
+                # Tokenize on the fly
+                return self.tokenizer.tokenize_sequence(sequence, self.max_length)
+
+    def _get_streaming_item(self, idx):
+        """Get item in streaming mode - loads data on demand."""
+        try:
+            # For streaming, we need to load the specific item
+            # This is a simplified implementation - for very large files,
+            # you might want to implement more sophisticated caching
+
+            if not hasattr(self, '_cached_data') or self._cached_data is None:
+                # Load the full data (this is still the bottleneck for very large files)
+                print(f"🔄 Loading data for streaming access...")
+                with open(self.data_file, 'rb') as f:
+                    import pickle
+                    self._cached_data = pickle.load(f)
+                print(f"✅ Data loaded for streaming")
+
+            sample = self._cached_data[idx]
+
+            if self.is_tokenized:
+                return sample['prot_tokens']
+            else:
+                if not self.tokenize_on_fly:
+                    raise ValueError("Data is not tokenized but tokenize_on_fly=False.")
+
+                # Extract sequence
+                if isinstance(sample, dict):
+                    if 'protein_seq' in sample:
+                        sequence = sample['protein_seq']
+                    elif 'sequence' in sample:
+                        sequence = sample['sequence']
+                    else:
+                        raise ValueError(f"Dict sample missing sequence key: {list(sample.keys())}")
+                elif isinstance(sample, str):
+                    sequence = sample
+                else:
+                    raise ValueError(f"Unknown sample type: {type(sample)}")
+
+                return self.tokenizer.tokenize_sequence(sequence, self.max_length)
+
+        except Exception as e:
+            print(f"❌ Error loading streaming item {idx}: {e}")
+            raise
 
 def safe_getattr(obj, path, default=None):
     """Safely get nested attributes with default fallback."""
@@ -245,8 +523,14 @@ class OptimizedUniRef50Trainer:
         """Setup data loaders for our custom processed UniRef50 data."""
         from torch.utils.data import DataLoader, random_split
 
-        # Load dataset
-        dataset = UniRef50Dataset(self.datafile)
+        # Load dataset with tokenization options
+        max_length = safe_getattr(self.cfg, 'data.max_protein_len', 512)
+        dataset = UniRef50Dataset(
+            self.datafile,
+            tokenize_on_fly=getattr(self, 'tokenize_on_fly', False),
+            max_length=max_length,
+            use_streaming=getattr(self, 'use_streaming', False)
+        )
 
         # Split into train/val
         train_ratio = safe_getattr(self.cfg, 'data.train_ratio', 0.9)
@@ -297,8 +581,14 @@ class OptimizedUniRef50Trainer:
         """Setup data loaders for our custom processed UniRef50 data."""
         from torch.utils.data import DataLoader, random_split
 
-        # Load dataset
-        dataset = UniRef50Dataset(self.datafile)
+        # Load dataset with tokenization options
+        max_length = safe_getattr(self.cfg, 'data.max_protein_len', 512)
+        dataset = UniRef50Dataset(
+            self.datafile,
+            tokenize_on_fly=getattr(self, 'tokenize_on_fly', False),
+            max_length=max_length,
+            use_streaming=getattr(self, 'use_streaming', False)
+        )
 
         # Split into train/val
         train_ratio = safe_getattr(self.cfg, 'data.train_ratio', 0.9)
@@ -452,7 +742,7 @@ class OptimizedUniRef50Trainer:
         """Setup Wandb with comprehensive logging configuration."""
         print("🚀 Setting up Wandb logging...")
 
-        # Initialize wandb
+        # Initialize wandb only on rank 0
         if self.rank == 0:
             run = wandb.init(
                 project=project_name,
@@ -529,7 +819,10 @@ class OptimizedUniRef50Trainer:
 
     def log_training_metrics(self, step: int, loss: float, lr: float, epoch: int,
                            batch_time: float = None, additional_metrics: dict = None):
-        """Log training metrics to Wandb."""
+        """Log training metrics to Wandb (rank 0 only)."""
+        if self.rank != 0:
+            return
+
         metrics = {
             'train/loss': loss,
             'train/learning_rate': lr,
@@ -547,8 +840,16 @@ class OptimizedUniRef50Trainer:
 
         wandb.log(metrics, step=step)
 
+    def log_to_wandb(self, metrics: dict, step: int = None):
+        """Helper method to log to wandb only on rank 0."""
+        if self.rank == 0:
+            wandb.log(metrics, step=step)
+
     def log_validation_metrics(self, step: int, val_loss: float, perplexity: float = None, recon_loss: float = None):
-        """Log validation metrics to Wandb."""
+        """Log validation metrics to Wandb (rank 0 only)."""
+        if self.rank != 0:
+            return
+
         metrics = {
             'val/loss': val_loss,
             'val/step': step,
@@ -825,7 +1126,10 @@ class OptimizedUniRef50Trainer:
             raise ValueError(f"Unknown sampling method: {sampling_method}. Use 'rigorous' or 'simple'.")
 
     def quick_generation_test(self, step: int, epoch: int, num_samples: int = 3, max_length: int = 128):
-        """Quick generation test during training to monitor generation quality."""
+        """Quick generation test during training to monitor generation quality (rank 0 only)."""
+        if self.rank != 0:
+            return True  # Return success for non-rank-0 processes
+
         # Use same max length as training data if not specified
         if max_length is None:
             max_length = safe_getattr(self.cfg, 'data.max_protein_len', 512)
@@ -905,8 +1209,8 @@ class OptimizedUniRef50Trainer:
                     sampling_method=self.sampling_method
                 )
 
-                # Log to wandb
-                wandb.log({
+                # Log to wandb (rank 0 only)
+                self.log_to_wandb({
                     'quick_gen/samples': quick_gen_table,
                     'quick_gen/valid_sequences': valid_count,
                     'quick_gen/total_sequences': num_samples,
@@ -921,7 +1225,7 @@ class OptimizedUniRef50Trainer:
                 return True
             else:
                 print(f"   ⚠️  No valid sequences generated ({num_samples} attempted)")
-                wandb.log({
+                self.log_to_wandb({
                     'quick_gen/valid_sequences': 0,
                     'quick_gen/total_sequences': num_samples,
                     'quick_gen/success_rate': 0.0,
@@ -932,7 +1236,7 @@ class OptimizedUniRef50Trainer:
 
         except Exception as e:
             print(f"   ❌ Quick generation test failed: {e}")
-            wandb.log({
+            self.log_to_wandb({
                 'quick_gen/error': str(e),
                 'quick_gen/sampling_method': self.sampling_method
             }, step=step)
@@ -1101,7 +1405,12 @@ class OptimizedUniRef50Trainer:
         return properties
 
     def comprehensive_evaluation(self, step: int, epoch: int, num_samples: int = 15, sampling_method: str = "rigorous"):
-        """Comprehensive evaluation including generation quality assessment."""
+        """Comprehensive evaluation including generation quality assessment (rank 0 only)."""
+        if self.rank != 0:
+            # For non-rank-0 processes, just run validation and return basic metrics
+            val_loss, _, _ = self.validate_model()
+            return val_loss, {'summary': {'avg_length': 0}}
+
         print(f"\n🔬 COMPREHENSIVE EVALUATION - Step {step}, Epoch {epoch}")
         print("=" * 80)
 
@@ -1131,7 +1440,7 @@ class OptimizedUniRef50Trainer:
                 )
 
             # Log sampling method used
-            wandb.log({
+            self.log_to_wandb({
                 'eval/sampling_method': sampling_method,
                 'eval/num_generated_samples': len(generated_sequences)
             }, step=step)
@@ -1204,7 +1513,7 @@ class OptimizedUniRef50Trainer:
                     wandb_metrics[f'training_data/{key}'] = value
 
             # Log to Wandb
-            wandb.log(wandb_metrics, step=step)
+            self.log_to_wandb(wandb_metrics, step=step)
 
             # 6. Create and log sample table with full sequences and ESM perplexity
             if generated_sequences:
@@ -1226,7 +1535,7 @@ class OptimizedUniRef50Trainer:
                     data=sample_data
                 )
 
-                wandb.log({
+                self.log_to_wandb({
                     'samples/generated_proteins': sample_table,
                     'samples/step': step
                 }, step=step)
@@ -1416,7 +1725,7 @@ class OptimizedUniRef50Trainer:
             xpu_memory_allocated = torch.xpu.memory_allocated() / 1024**3  # GB
             xpu_memory_reserved = torch.xpu.memory_reserved() / 1024**3   # GB
 
-            wandb.log({
+            self.log_to_wandb({
                 'system/xpu_memory_allocated_gb': xpu_memory_allocated,
                 'system/xpu_memory_reserved_gb': xpu_memory_reserved,
                 'system/step': step
@@ -1425,7 +1734,7 @@ class OptimizedUniRef50Trainer:
             gpu_memory_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
             gpu_memory_reserved = torch.cuda.memory_reserved() / 1024**3   # GB
 
-            wandb.log({
+            self.log_to_wandb({
                 'system/gpu_memory_allocated_gb': gpu_memory_allocated,
                 'system/gpu_memory_reserved_gb': gpu_memory_reserved,
                 'system/step': step
@@ -1916,7 +2225,7 @@ class OptimizedUniRef50Trainer:
                     self.save_checkpoint(step, epoch, best_loss, is_best)
 
                     # Log checkpoint info
-                    wandb.log({
+                    self.log_to_wandb({
                         'checkpoint/step': step,
                         'checkpoint/best_loss': best_loss,
                         'checkpoint/current_loss': avg_epoch_loss,
@@ -1930,7 +2239,7 @@ class OptimizedUniRef50Trainer:
 
             # End of epoch logging
             avg_epoch_loss = epoch_loss / num_batches
-            wandb.log({
+            self.log_to_wandb({
                 'epoch/loss': avg_epoch_loss,
                 'epoch/number': epoch,
                 'epoch/step': step
@@ -1951,7 +2260,7 @@ class OptimizedUniRef50Trainer:
                 self.save_checkpoint(step, epoch+1, best_loss, is_best=True)
 
             # Log epoch summary
-            wandb.log({
+            self.log_to_wandb({
                 'epoch/number': epoch + 1,
                 'epoch/avg_train_loss': avg_epoch_loss,
                 'epoch/val_loss': val_loss,
@@ -1973,7 +2282,7 @@ class OptimizedUniRef50Trainer:
         )
 
         # Training summary
-        wandb.log({
+        self.log_to_wandb({
             'summary/final_step': step,
             'summary/final_train_loss': epoch_loss / num_batches,
             'summary/final_val_loss': final_val_loss,
@@ -2049,6 +2358,10 @@ def main():
                        help="Sampling method: 'rigorous' (CTMC) or 'simple' (heuristic)")
     parser.add_argument("--epochs", type=int, default=None,
                        help="Override number of epochs (useful for hyperparameter sweeps)")
+    parser.add_argument("--tokenize_on_fly", action="store_true",
+                       help="Tokenize untokenized data on the fly (use with raw sequence data)")
+    parser.add_argument("--use_streaming", action="store_true",
+                       help="Use streaming mode for very large files (>50GB)")
 
     args = parser.parse_args()
 
@@ -2064,6 +2377,8 @@ def main():
     print(f"🖥️  Device: {args.device}")
     print(f"🎲 Seed: {args.seed}")
     print(f"🧬 Sampling method: {args.sampling_method}")
+    print(f"🔤 Tokenize on fly: {args.tokenize_on_fly}")
+    print(f"🌊 Use streaming: {args.use_streaming}")
     print()
 
     try:
@@ -2081,6 +2396,10 @@ def main():
             sampling_method=args.sampling_method,
             epochs_override=args.epochs
         )
+
+        # Set tokenization and streaming options
+        trainer.tokenize_on_fly = args.tokenize_on_fly
+        trainer.use_streaming = args.use_streaming
 
         print("✅ Trainer initialized successfully!")
         print()
