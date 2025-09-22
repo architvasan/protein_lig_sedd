@@ -51,6 +51,13 @@ def setup_ddp(rank, world_size):
     dist.init_process_group("ccl", rank=rank, world_size=world_size)
     torch.xpu.set_device(rank)
 
+def setup_ddp_polaris(rank, world_size):
+    torch.cuda.set_device(int(os.environ['LOCAL_RANK']))
+    dist.init_process_group("nccl")#, rank=rank, world_size=world_size)
+    rank = dist.get_rank()
+    device_id = rank % torch.cuda.device_count()
+    return rank, device_id
+
 class UniRef50Dataset(torch.utils.data.Dataset):
     """Dataset class for processed UniRef50 data."""
 
@@ -104,9 +111,11 @@ class OptimizedUniRef50Trainer:
         np.random.seed(self.seed)
 
         if self.use_ddp: 
-            setup_ddp(self.rank, self.world_size)
+            self.rank, self.device = setup_ddp_polaris(self.rank, self.world_size)
+        print(f"{self.rank=}")
+        print(f"{self.device=}")
         # Setup device with cross-platform compatibility
-        self.device = self.setup_device(self.rank)
+        #self.device = self.setup_device(self.rank)
         #print(f"✅ Using device: {self.device}")
 
         # Load configuration
@@ -389,6 +398,7 @@ class OptimizedUniRef50Trainer:
             self.use_amp = True
             print("✅ Using XPU mixed precision training with IPEX optimization")
         elif device_type == 'cuda':
+            self.model.to(self.device)
             self.scaler = torch.cuda.amp.GradScaler()
             self.use_amp = True
             print("✅ Using CUDA mixed precision training")
@@ -1973,26 +1983,27 @@ def main():
     import argparse
     import os, socket
 
-    try:
+    if False:
         from mpi4py import MPI
         # Print startup banner
-        comm = MPI.COMM_WORLD
-        size = comm.Get_size()
-        rank = comm.Get_rank()
-        local_rank = os.environ.get('PALS_LOCAL_RANK', 0)
-        os.environ['RANK'] = str(rank)
-        os.environ['WORLD_SIZE'] = str(size)
-        MASTER_ADDR = socket.gethostname() if rank == 0 else None
-        MASTER_ADDR = comm.bcast(MASTER_ADDR, root=0)
-        os.environ['MASTER_ADDR'] = f"{MASTER_ADDR}.hsn.cm.aurora.alcf.anl.gov"
-        os.environ['MASTER_PORT'] = '2345'
-        print(f"DDP: Hi from rank {rank} of {size} with local rank {local_rank}. {MASTER_ADDR}")
+        #comm = MPI.COMM_WORLD
+        #size = comm.Get_size()
+        #rank = comm.Get_rank()
+        #local_rank = os.environ.get('PALS_LOCAL_RANK', 0)
+        #os.environ['RANK'] = str(rank)
+        #os.environ['WORLD_SIZE'] = str(size)
+        #MASTER_ADDR = socket.gethostname() if rank == 0 else None
+        #MASTER_ADDR = comm.bcast(MASTER_ADDR, root=0)
+        #os.environ['MASTER_ADDR'] = f"{MASTER_ADDR}.hsn.cm.aurora.alcf.anl.gov"
+        #os.environ['MASTER_PORT'] = '2345'
+        #print(f"DDP: Hi from rank {rank} of {size} with local rank {local_rank}. {MASTER_ADDR}")
 
-    except ImportError:
+    if True:
         print("MPI not available, falling back to single node")
-        rank = 0
-        size = 1
-        local_rank = 0
+        rank = int(os.environ['LOCAL_RANK'])#0
+        torch.cuda.set_device(rank)
+        size = 4
+        #local_rank = 0
 
     print("\n" + "="*80)
     print("🧬 OPTIMIZED UNIREF50 SEDD TRAINING")
