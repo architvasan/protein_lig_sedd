@@ -52,7 +52,7 @@ VENV_PATH="pldd_venv"        # Virtual environment path
 LOG_DIR="logs"               # Log directory
 
 # Execution Mode
-EXECUTION_MODE="queue"       # Options: "interactive", "queue"
+EXECUTION_MODE="interactive"       # Options: "interactive", "queue"
                             # interactive: Run training directly (for testing/debugging)
                             # queue: Submit PBS job to Aurora queue system
 
