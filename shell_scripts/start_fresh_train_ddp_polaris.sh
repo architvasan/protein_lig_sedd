@@ -172,6 +172,7 @@ if [ "$EXECUTION_MODE" = "interactive" ]; then
     # Run DDP training directly
     #mpiexec -n $NUM_GPUS -ppn $PPN \
     torchrun --nnodes=1 --nproc_per_node=4 --rdzv_id=100 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR:29400 \ 
+
     CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.run \
         protlig_dd/training/run_train_uniref_ddp_polaris.py \
         --work_dir "$WORK_DIR" \
