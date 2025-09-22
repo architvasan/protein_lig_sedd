@@ -1,23 +1,23 @@
 #!/bin/bash
 
-# 🚀 AURORA DDP FRESH TRAINING SCRIPT
+# 🚀 POLARIS DDP FRESH TRAINING SCRIPT
 #
-# This script supports both interactive and queue-based distributed training on Aurora.
+# This script supports both interactive and queue-based distributed training on Polaris.
 # All configuration parameters are hardcoded at the top for easy modification.
 # NO INTERACTIVE PROMPTS - suitable for queue system submission.
 #
 # 🎯 EXECUTION MODES:
 # - INTERACTIVE: Run training directly (for testing/debugging)
-# - QUEUE: Submit PBS job to Aurora scheduler (for production)
+# - QUEUE: Submit PBS job to Polaris scheduler (for production)
 #
 # 📝 TO CUSTOMIZE YOUR TRAINING:
 # 1. Edit the parameters in the CONFIGURATION section below
 # 2. Set EXECUTION_MODE to "interactive" or "queue"
-# 3. Run: ./shell_scripts/start_fresh_train_ddp_aurora.sh
+# 3. Run: ./shell_scripts/start_fresh_train_ddp_polaris.sh
 #
 # 🔧 Key parameters to modify:
 # - EXECUTION_MODE: "interactive" or "queue"
-# - NUM_GPUS: Number of XPU devices (1-4 per node)
+# - NUM_GPUS: Number of CUDA devices (1-4 per node)
 # - WALLTIME: Job duration (format: HH:MM:SS)
 # - CONFIG_FILE: Training configuration file
 # - WANDB_PROJECT: Experiment tracking project name
@@ -32,18 +32,18 @@ WORK_DIR="./experiments/polaris_ddp_$(date +%Y%m%d_%H%M%S)"
 CONFIG_FILE="configs/config_uniref50_ddp.yaml"
 DATAFILE="./input_data/subset_uniref50.pt"
 WANDB_PROJECT="uniref50_polaris_ddp"
-DEVICE="cuda"  # Aurora uses Intel XPU
+DEVICE="cuda"  # Polaris uses NVIDIA CUDA
 SEED=42
 
 # DDP Configuration
-NUM_GPUS=4                    # Number of XPU devices to use
+NUM_GPUS=4                    # Number of CUDA devices to use
 AFFINITY_FILE="shell_scripts/set_affinity_gpu_polaris.sh" #file to set gpu aff
 MASTER_PORT=29500            # Port for DDP communication
-BACKEND="nccl"                # Use CCL backend for Intel XPU
+BACKEND="nccl"                # Use NCCL backend for NVIDIA GPUs
 
 # Job Configuration
 JOB_NAME="polaris_sedd_ddp"
-QUEUE="debug"                # Aurora queue name
+QUEUE="debug"                # Polaris queue name
 WALLTIME="01:00:00"          # 2 hours
 NODES=1                      # Number of nodes
 PPN=4                        # Processes per node (should match NUM_GPUS)
@@ -55,7 +55,7 @@ LOG_DIR="logs"               # Log directory
 # Execution Mode
 EXECUTION_MODE="interactive"       # Options: "interactive", "queue"
                             # interactive: Run training directly (for testing/debugging)
-                            # queue: Submit PBS job to Aurora queue system
+                            # queue: Submit PBS job to Polaris queue system
 
 # Checkpoint Handling (no interactive prompts for queue systems)
 CHECKPOINT_ACTION="remove"   # Options: "remove", "backup", "ignore", "cancel"
@@ -95,7 +95,7 @@ mkdir -p "$WORK_DIR"
 mkdir -p "$LOG_DIR"
 
 # Generate unique run name
-RUN_NAME="aurora_ddp_$(date +%Y%m%d_%H%M%S)"
+RUN_NAME="polaris_ddp_$(date +%Y%m%d_%H%M%S)"
 
 # Check if checkpoints exist in work directory
 if [ -d "$WORK_DIR/checkpoints" ] && [ "$(ls -A $WORK_DIR/checkpoints)" ]; then
@@ -156,7 +156,7 @@ echo ""
 if [ "$EXECUTION_MODE" = "interactive" ]; then
     echo "🚀 Running training interactively..."
 else
-    echo "🚀 Proceeding with Aurora DDP job submission..."
+    echo "🚀 Proceeding with Polaris DDP job submission..."
 fi
 
 echo ""
@@ -170,10 +170,17 @@ if [ "$EXECUTION_MODE" = "interactive" ]; then
     export MASTER_PORT=$MASTER_PORT
 
     # Run DDP training directly
-    #mpiexec -n $NUM_GPUS -ppn $PPN \
-    torchrun --nnodes=1 --nproc_per_node=4 --rdzv_id=100 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR:29400 \ 
+    # Set MASTER_ADDR for torchrun
+    export MASTER_ADDR=localhost
+    export MASTER_PORT=$MASTER_PORT
 
-    CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.run \
+    # Run DDP training with torchrun
+    CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun \
+        --nnodes=1 \
+        --nproc_per_node=$NUM_GPUS \
+        --rdzv_id=100 \
+        --rdzv_backend=c10d \
+        --rdzv_endpoint=localhost:$MASTER_PORT \
         protlig_dd/training/run_train_uniref_ddp_polaris.py \
         --work_dir "$WORK_DIR" \
         --config "$CONFIG_FILE" \
@@ -182,7 +189,7 @@ if [ "$EXECUTION_MODE" = "interactive" ]; then
         --wandb_name "$RUN_NAME" \
         --device "$DEVICE" \
         --seed $SEED \
-        $FRESH_FLAG 2>&1 | tee "$LOG_DIR/aurora_ddp_interactive.log"
+        $FRESH_FLAG 2>&1 | tee "$LOG_DIR/polaris_ddp_interactive.log"
 
     # Check exit status
     if [ $? -eq 0 ]; then
@@ -191,32 +198,33 @@ if [ "$EXECUTION_MODE" = "interactive" ]; then
         echo "=============================================="
         echo "📊 Check your Wandb dashboard for results"
         echo "📁 Checkpoints saved in: $WORK_DIR/checkpoints/"
-        echo "📝 Log file: $LOG_DIR/aurora_ddp_interactive.log"
+        echo "📝 Log file: $LOG_DIR/polaris_ddp_interactive.log"
     else
         echo ""
         echo "❌ INTERACTIVE TRAINING FAILED"
         echo "============================="
-        echo "💡 Check the log file: $LOG_DIR/aurora_ddp_interactive.log"
+        echo "💡 Check the log file: $LOG_DIR/polaris_ddp_interactive.log"
     fi
 
 else
-    echo "📝 Creating Aurora job script..."
+    echo "📝 Creating Polaris job script..."
 
-    # Create Aurora job script
-    JOB_SCRIPT="$WORK_DIR/aurora_ddp_job.sh"
+    # Create Polaris job script
+    JOB_SCRIPT="$WORK_DIR/polaris_ddp_job.sh"
     cat > "$JOB_SCRIPT" << EOF
 #!/bin/bash
-#PBS -l select=${NODES}:system=aurora_compute
+#PBS -l select=${NODES}:system=polaris
 #PBS -l place=scatter
 #PBS -l walltime=${WALLTIME}
 #PBS -q ${QUEUE}
-#PBS -A Aurora_deployment
+#PBS -A datascience
 #PBS -N ${JOB_NAME}
-#PBS -o ${LOG_DIR}/aurora_ddp_\${PBS_JOBID}.out
-#PBS -e ${LOG_DIR}/aurora_ddp_\${PBS_JOBID}.err
+#PBS -o ${LOG_DIR}/polaris_ddp_\${PBS_JOBID}.out
+#PBS -e ${LOG_DIR}/polaris_ddp_\${PBS_JOBID}.err
 
 # Load modules and activate environment
-module load frameworks
+module use /soft/modulefiles
+module load conda
 source ${VENV_PATH}/bin/activate
 
 # Set environment variables
@@ -226,8 +234,17 @@ export MASTER_PORT=${MASTER_PORT}
 # Change to work directory
 cd \$PBS_O_WORKDIR
 
-# Run DDP training
-mpiexec -n ${NUM_GPUS} -ppn ${PPN} python -m protlig_dd.training.run_train_uniref_ddp_aurora \\
+# Run DDP training with torchrun
+export MASTER_ADDR=localhost
+export MASTER_PORT=${MASTER_PORT}
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun \\
+    --nnodes=1 \\
+    --nproc_per_node=${NUM_GPUS} \\
+    --rdzv_id=100 \\
+    --rdzv_backend=c10d \\
+    --rdzv_endpoint=localhost:${MASTER_PORT} \\
+    protlig_dd/training/run_train_uniref_ddp_polaris.py \\
     --work_dir "${WORK_DIR}" \\
     --config "${CONFIG_FILE}" \\
     --datafile "${DATAFILE}" \\
@@ -235,13 +252,13 @@ mpiexec -n ${NUM_GPUS} -ppn ${PPN} python -m protlig_dd.training.run_train_unire
     --wandb_name "${RUN_NAME}" \\
     --device "${DEVICE}" \\
     --seed ${SEED} \\
-    ${FRESH_FLAG} > ${LOG_DIR}/aurora_ddp_\${PBS_JOBID}.log 2> ${LOG_DIR}/aurora_ddp_\${PBS_JOBID}.err
+    ${FRESH_FLAG} > ${LOG_DIR}/polaris_ddp_\${PBS_JOBID}.log 2> ${LOG_DIR}/polaris_ddp_\${PBS_JOBID}.err
 EOF
 
 echo "✅ Job script created: $JOB_SCRIPT"
 echo ""
 
-echo "🎬 SUBMITTING AURORA JOB..."
+echo "🎬 SUBMITTING POLARIS JOB..."
 echo "=========================="
 
 # Submit the job
@@ -252,7 +269,7 @@ if [ $? -eq 0 ]; then
     echo "============================="
     echo "📋 Job ID: $JOB_ID"
     echo "📁 Work Dir: $WORK_DIR"
-    echo "📊 Logs: $LOG_DIR/aurora_ddp_${JOB_ID}.{out,err}"
+    echo "📊 Logs: $LOG_DIR/polaris_ddp_${JOB_ID}.{out,err}"
     echo ""
     echo "🔍 Monitor job status:"
     echo "   qstat $JOB_ID"
@@ -271,4 +288,4 @@ fi
 fi  # End of EXECUTION_MODE if-else block
 
 echo ""
-echo "=== Aurora DDP script finished ==="
+echo "=== Polaris DDP script finished ==="
