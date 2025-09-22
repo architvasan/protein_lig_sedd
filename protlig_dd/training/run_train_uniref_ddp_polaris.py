@@ -453,45 +453,46 @@ class OptimizedUniRef50Trainer:
         print("🚀 Setting up Wandb logging...")
 
         # Initialize wandb
-        run = wandb.init(
-            project=project_name,
-            name=run_name,
-            config={
-                # Model configuration
-                'model_name': safe_getattr(self.cfg, 'model.name', 'transformer'),
-                'model_type': safe_getattr(self.cfg, 'model.type', 'ddit'),
-                'hidden_size': safe_getattr(self.cfg, 'model.hidden_size', 512),
-                'n_blocks': safe_getattr(self.cfg, 'model.n_blocks', 8),
-                'n_heads': safe_getattr(self.cfg, 'model.n_heads', 8),
-                'dropout': safe_getattr(self.cfg, 'model.dropout', 0.1),
+        if self.rank == 0:
+            run = wandb.init(
+                project=project_name,
+                name=run_name,
+                config={
+                    # Model configuration
+                    'model_name': safe_getattr(self.cfg, 'model.name', 'transformer'),
+                    'model_type': safe_getattr(self.cfg, 'model.type', 'ddit'),
+                    'hidden_size': safe_getattr(self.cfg, 'model.hidden_size', 512),
+                    'n_blocks': safe_getattr(self.cfg, 'model.n_blocks', 8),
+                    'n_heads': safe_getattr(self.cfg, 'model.n_heads', 8),
+                    'dropout': safe_getattr(self.cfg, 'model.dropout', 0.1),
 
-                # Training configuration
-                'batch_size': safe_getattr(self.cfg, 'training.batch_size', 16),
-                'accumulation_steps': safe_getattr(self.cfg, 'training.accum', 2),
-                'learning_rate': safe_getattr(self.cfg, 'optim.lr', 5e-5),
-                'weight_decay': safe_getattr(self.cfg, 'optim.weight_decay', 0.01),
-                'warmup_steps': safe_getattr(self.cfg, 'optim.warmup', 1000),
-                'max_iterations': safe_getattr(self.cfg, 'training.n_iters', 5000),
-                'ema_decay': safe_getattr(self.cfg, 'training.ema', 0.999),
+                    # Training configuration
+                    'batch_size': safe_getattr(self.cfg, 'training.batch_size', 16),
+                    'accumulation_steps': safe_getattr(self.cfg, 'training.accum', 2),
+                    'learning_rate': safe_getattr(self.cfg, 'optim.lr', 5e-5),
+                    'weight_decay': safe_getattr(self.cfg, 'optim.weight_decay', 0.01),
+                    'warmup_steps': safe_getattr(self.cfg, 'optim.warmup', 1000),
+                    'max_iterations': safe_getattr(self.cfg, 'training.n_iters', 5000),
+                    'ema_decay': safe_getattr(self.cfg, 'training.ema', 0.999),
 
-                # Data configuration
-                'max_protein_len': safe_getattr(self.cfg, 'data.max_protein_len', 512),
-                'vocab_size': safe_getattr(self.cfg, 'data.vocab_size_protein', 25),
-                'train_ratio': safe_getattr(self.cfg, 'data.train_ratio', 0.9),
+                    # Data configuration
+                    'max_protein_len': safe_getattr(self.cfg, 'data.max_protein_len', 512),
+                    'vocab_size': safe_getattr(self.cfg, 'data.vocab_size_protein', 25),
+                    'train_ratio': safe_getattr(self.cfg, 'data.train_ratio', 0.9),
 
-                # Noise configuration
-                'noise_type': safe_getattr(self.cfg, 'noise.type', 'cosine'),
-                'sigma_min': safe_getattr(self.cfg, 'noise.sigma_min', 1e-4),
-                'sigma_max': safe_getattr(self.cfg, 'noise.sigma_max', 0.5),
+                    # Noise configuration
+                    'noise_type': safe_getattr(self.cfg, 'noise.type', 'cosine'),
+                    'sigma_min': safe_getattr(self.cfg, 'noise.sigma_min', 1e-4),
+                    'sigma_max': safe_getattr(self.cfg, 'noise.sigma_max', 0.5),
 
-                # Curriculum learning
-                'curriculum_enabled': safe_getattr(self.cfg, 'curriculum.enabled', False),
-                'preschool_time': safe_getattr(self.cfg, 'curriculum.preschool_time', 5000),
+                    # Curriculum learning
+                    'curriculum_enabled': safe_getattr(self.cfg, 'curriculum.enabled', False),
+                    'preschool_time': safe_getattr(self.cfg, 'curriculum.preschool_time', 5000),
 
-                # System info
-                'device': str(self.device),
-                'seed': safe_getattr(self.cfg, 'training.seed', 42),
-                'epochs': self.epochs_override if self.epochs_override is not None else safe_getattr(self.cfg, 'training.epochs', 50),
+                    # System info
+                    'device': str(self.device),
+                    'seed': safe_getattr(self.cfg, 'training.seed', 42),
+                    'epochs': self.epochs_override if self.epochs_override is not None else safe_getattr(self.cfg, 'training.epochs', 50),
             },
             tags=['uniref50', 'sedd', 'protein', 'diffusion', 'optimized'],
             notes=f"Optimized UniRef50 training with improved V100-compatible attention and enhanced curriculum learning"
@@ -517,10 +518,11 @@ class OptimizedUniRef50Trainer:
     def setup_wandb_model_watching(self):
         """Setup model watching after model is created."""
         try:
-            # Watch model for gradient and parameter tracking
-            log_freq = safe_getattr(self.cfg, 'training.log_freq', 50)
-            wandb.watch(self.model, log='all', log_freq=log_freq)
-            print("✅ Wandb model watching enabled")
+            if self.rank == 0:
+                # Watch model for gradient and parameter tracking
+                log_freq = safe_getattr(self.cfg, 'training.log_freq', 50)
+                wandb.watch(self.model, log='all', log_freq=log_freq)
+                print("✅ Wandb model watching enabled")
         except Exception as e:
             print(f"⚠️  Warning: Could not setup model watching: {e}")
             print("   Training will continue without gradient tracking")

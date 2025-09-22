@@ -29,7 +29,7 @@
 
 # Training Configuration
 WORK_DIR="./experiments/polaris_ddp_$(date +%Y%m%d_%H%M%S)"
-CONFIG_FILE="configs/config_uniref50_ddp.yaml"
+CONFIG_FILE="configs/config_uniref50_hpo4_ddp.yaml"
 DATAFILE="./input_data/subset_uniref50.pt"
 WANDB_PROJECT="uniref50_polaris_ddp"
 DEVICE="cuda"  # Polaris uses NVIDIA CUDA
@@ -166,7 +166,7 @@ if [ "$EXECUTION_MODE" = "interactive" ]; then
     echo "=================================="
 
     # Set environment variables
-    export PYTHONPATH="$PWD:$PYTHONPATH"
+    export PYTHONPATH="$VENV_PATH/bin/python"#"$VENV_PATH:$PYTHONPATH"
     export MASTER_PORT=$MASTER_PORT
 
     # Run DDP training directly
@@ -175,7 +175,7 @@ if [ "$EXECUTION_MODE" = "interactive" ]; then
     export MASTER_PORT=$MASTER_PORT
 
     # Run DDP training with torchrun
-    CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun \
+    CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.run \
         --nnodes=1 \
         --nproc_per_node=$NUM_GPUS \
         --rdzv_id=100 \
