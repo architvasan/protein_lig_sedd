@@ -1,13 +1,14 @@
 """
 Optimized training script for UniRef50 with improved stability and efficiency.
 """
-
+import torch
+### Import intel_extension_for_pytorch for running on aurora
+import intel_extension_for_pytorch as ipex
 import datetime
 import os
 import sys
 import gc
 import time
-
 # Add the project root to Python path to ensure protlig_dd module can be found
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if project_root not in sys.path:
@@ -16,7 +17,6 @@ if project_root not in sys.path:
 from itertools import chain
 import wandb
 import numpy as np
-import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -26,7 +26,6 @@ from typing import Optional
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
-
 import protlig_dd.processing.losses as losses
 import protlig_dd.sampling.sampling as sampling
 import protlig_dd.processing.graph_lib as graph_lib
@@ -37,21 +36,17 @@ from protlig_dd.model.transformers_protlig_cross_v100_optimized import Optimized
 from protlig_dd.model.ema import ExponentialMovingAverage
 from protlig_dd.utils.lr_scheduler import WarmupCosineLR
 from torch.utils.data.distributed import DistributedSampler
-
+from torch.nn.parallel import DistributedDataParallel as DDP
+import oneccl_bindings_for_pytorch as torch_ccl
+### Import torch.distributed for running on aurora
 import torch.distributed as dist
+
 def setup_ddp(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-
-def prepare(rank, world_size, batch_size=32, pin_memory=False, num_workers=0):
-    dataset = Your_Dataset()
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False)
-
-    dataloader = DataLoader(dataset, batch_size=batch_size, pin_memory=pin_memory, num_workers=num_workers, drop_last=False, shuffle=False, sampler=sampler)
-
-    return dataloader
-
+    # Use ccl backend for Intel XPU instead of nccl
+    dist.init_process_group("ccl", rank=rank, world_size=world_size)
+    torch.xpu.set_device(rank)
 
 class UniRef50Dataset(torch.utils.data.Dataset):
     """Dataset class for processed UniRef50 data."""
@@ -68,7 +63,6 @@ class UniRef50Dataset(torch.utils.data.Dataset):
         # Return the tokenized protein sequence
         return sample['prot_tokens']
 
-
 def safe_getattr(obj, path, default=None):
     """Safely get nested attributes with default fallback."""
     try:
@@ -80,7 +74,6 @@ def safe_getattr(obj, path, default=None):
     except AttributeError:
         return default
 
-
 @dataclass
 class OptimizedUniRef50Trainer:
     """
@@ -91,7 +84,7 @@ class OptimizedUniRef50Trainer:
     datafile: str = './input_data/processed_uniref50.pt'
     rank: int| None
     world_size: int| None
-    dev_id: str = 'cuda:0'
+    dev_id: str = 'xpu:0'
     seed: int = 42
     resume_checkpoint: Optional[str] = None
     force_fresh_start: bool = False
@@ -126,12 +119,15 @@ class OptimizedUniRef50Trainer:
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         os.makedirs(self.sample_dir, exist_ok=True)
 
-
         print(f"Config loaded from: {self.config_file}")
 
         # Initialize device-specific attributes
         device_type = str(self.device).split(':')[0]
-        if device_type == 'cuda':
+        if device_type == 'xpu':
+            self.use_amp = True
+            self.scaler = None  # Will be initialized in setup_training
+            print("✅ XPU mixed precision will be enabled")
+        elif device_type == 'cuda':
             self.use_amp = True
             self.scaler = None  # Will be initialized in setup_training
             print("✅ CUDA mixed precision will be enabled")
@@ -166,7 +162,10 @@ class OptimizedUniRef50Trainer:
         """Setup device with cross-platform compatibility."""
         if dev_id == "auto":
             # Auto-detect best available device
-            if torch.cuda.is_available():
+            if hasattr(torch, 'xpu') and torch.xpu.is_available():
+                device = torch.device("xpu:0")
+                print("⚡ Auto-detected: Intel XPU")
+            elif torch.cuda.is_available():
                 device = torch.device("cuda:0")
                 print("🚀 Auto-detected: CUDA GPU")
             elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
@@ -181,6 +180,13 @@ class OptimizedUniRef50Trainer:
                 print("🍎 Using Apple Silicon MPS")
             else:
                 print("⚠️  MPS not available, falling back to CPU")
+                device = torch.device("cpu")
+        elif dev_id.startswith("xpu"):
+            if hasattr(torch, 'xpu') and torch.xpu.is_available():
+                device = torch.device(dev_id)
+                print(f"⚡ Using Intel XPU: {dev_id}")
+            else:
+                print("⚠️  XPU not available, falling back to CPU")
                 device = torch.device("cpu")
         elif dev_id.startswith("cuda"):
             if torch.cuda.is_available():
@@ -245,7 +251,7 @@ class OptimizedUniRef50Trainer:
 
         # Determine pin_memory based on device
         device_type = str(self.device).split(':')[0]
-        pin_memory = device_type == 'cuda'  # Only pin memory for CUDA
+        pin_memory = device_type in ['cuda', 'xpu']  # Pin memory for CUDA and XPU
 
         self.train_loader = DataLoader(
             train_dataset,
@@ -295,6 +301,10 @@ class OptimizedUniRef50Trainer:
         batch_size = safe_getattr(self.cfg, 'training.batch_size', 16)
         num_workers = 0 #safe_getattr(self.cfg, 'training.num_workers', 0)  # Use 0 to avoid multiprocessing issues
 
+        # Determine pin_memory based on device
+        device_type = str(self.device).split(':')[0]
+        pin_memory = device_type in ['cuda', 'xpu']  # Pin memory for CUDA and XPU
+
         self.train_sampler = DistributedSampler(
                             train_dataset,
                             num_replicas=self.world_size,
@@ -308,8 +318,8 @@ class OptimizedUniRef50Trainer:
                                 pin_memory=pin_memory,
                                 num_workers=num_workers,
                                 drop_last=False,
-                                shuffle=True,
-                                sampler=train_sampler) 
+                                shuffle=False,  # Don't shuffle when using sampler
+                                sampler=self.train_sampler)
 
         self.val_loader = DataLoader(
             val_dataset,
@@ -355,27 +365,27 @@ class OptimizedUniRef50Trainer:
         
         print(f"Model ready. Parameters: {sum(p.numel() for p in self.model.parameters()):,}")
     
-    def wrap_model_ddp(self):
-        self.score_model.to(self.device)
-        self.score_model_ddp = DDP(
-                                self.score_model,
-                                device_ids=[self.rank],
-                                output_device=self.rank,
-                                find_unused_parameters=True)
 
     def setup_optimizer(self):
         """Setup optimizer with improved scheduling."""
         print("Setting up optimizer...")
-        
+
         # Get optimizer
         self.optimizer = losses.get_optimizer(
             self.cfg,
             chain(self.model.parameters(), self.noise.parameters())
         )
-        
-        # Setup gradient scaler for mixed precision (CUDA only)
+
+        # Apply IPEX optimization for Intel XPU
         device_type = str(self.device).split(':')[0]
-        if device_type == 'cuda':
+        if device_type == 'xpu':
+            print("🔧 Applying IPEX optimization for Intel XPU...")
+            self.model.to(self.device)
+            self.model, self.optimizer = ipex.optimize(self.model, optimizer=self.optimizer)
+            self.scaler = torch.xpu.amp.GradScaler()
+            self.use_amp = True
+            print("✅ Using XPU mixed precision training with IPEX optimization")
+        elif device_type == 'cuda':
             self.scaler = torch.cuda.amp.GradScaler()
             self.use_amp = True
             print("✅ Using CUDA mixed precision training")
@@ -407,6 +417,13 @@ class OptimizedUniRef50Trainer:
         }
         
         print("Optimizer ready.")
+
+    def wrap_model_ddp(self):
+        self.model_ddp = DDP(
+                            self.model,
+                            device_ids=[self.rank],
+                            output_device=self.rank,
+                            find_unused_parameters=True)
 
     def setup_wandb(self, project_name: str, run_name: str):
         """Setup Wandb with comprehensive logging configuration."""
@@ -714,7 +731,10 @@ class OptimizedUniRef50Trainer:
 
                         # Get model predictions
                         device_type = str(self.device).split(':')[0]
-                        if device_type == 'cuda':
+                        if device_type == 'xpu':
+                            with torch.xpu.amp.autocast(enabled=False):
+                                logits = self.model(sample, t)
+                        elif device_type == 'cuda':
                             with torch.cuda.amp.autocast(enabled=False):
                                 logits = self.model(sample, t)
                         else:
@@ -1360,8 +1380,19 @@ class OptimizedUniRef50Trainer:
             return {}
 
     def log_system_metrics(self, step: int):
-        """Log system metrics like GPU memory usage."""
-        if torch.cuda.is_available():
+        """Log system metrics like GPU/XPU memory usage."""
+        device_type = str(self.device).split(':')[0]
+
+        if device_type == 'xpu' and hasattr(torch, 'xpu') and torch.xpu.is_available():
+            xpu_memory_allocated = torch.xpu.memory_allocated() / 1024**3  # GB
+            xpu_memory_reserved = torch.xpu.memory_reserved() / 1024**3   # GB
+
+            wandb.log({
+                'system/xpu_memory_allocated_gb': xpu_memory_allocated,
+                'system/xpu_memory_reserved_gb': xpu_memory_reserved,
+                'system/step': step
+            }, step=step)
+        elif device_type == 'cuda' and torch.cuda.is_available():
             gpu_memory_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
             gpu_memory_reserved = torch.cuda.memory_reserved() / 1024**3   # GB
 
@@ -1370,6 +1401,17 @@ class OptimizedUniRef50Trainer:
                 'system/gpu_memory_reserved_gb': gpu_memory_reserved,
                 'system/step': step
             }, step=step)
+
+    def _get_device_memory_str(self):
+        """Get device memory usage as a formatted string."""
+        device_type = str(self.device).split(':')[0]
+
+        if device_type == 'xpu' and hasattr(torch, 'xpu') and torch.xpu.is_available():
+            return f'{torch.xpu.memory_allocated()/1024**3:.1f}GB'
+        elif device_type == 'cuda' and torch.cuda.is_available():
+            return f'{torch.cuda.memory_allocated()/1024**3:.1f}GB'
+        else:
+            return 'N/A'
 
     def compute_loss(self, batch):
         """Compute loss with improved curriculum learning."""
@@ -1404,7 +1446,12 @@ class OptimizedUniRef50Trainer:
 
         # Forward pass with device-aware autocast and shape validation
         try:
-            if self.use_amp and str(self.device).split(':')[0] == 'cuda':
+            device_type = str(self.device).split(':')[0]
+            if self.use_amp and device_type == 'xpu':
+                with torch.xpu.amp.autocast():
+                    log_score = self.model(perturbed_batch, sigma)
+                    loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+            elif self.use_amp and device_type == 'cuda':
                 with torch.cuda.amp.autocast():
                     log_score = self.model(perturbed_batch, sigma)
                     loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
@@ -1432,7 +1479,13 @@ class OptimizedUniRef50Trainer:
                     print(f"   Fixed shape: {perturbed_batch.shape}")
 
                     # Retry the forward pass
-                    if self.use_amp and str(self.device).split(':')[0] == 'cuda':
+                    device_type = str(self.device).split(':')[0]
+                    if self.use_amp and device_type == 'xpu':
+                        with torch.xpu.amp.autocast():
+                            log_score = self.model(perturbed_batch, sigma)
+                            loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+                            loss = (dsigma[:, None] * loss).mean()
+                    elif self.use_amp and device_type == 'cuda':
                         with torch.cuda.amp.autocast():
                             log_score = self.model(perturbed_batch, sigma)
                             loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
@@ -1661,7 +1714,7 @@ class OptimizedUniRef50Trainer:
         self.setup_data_loaders()
         self.setup_model()
         self.setup_optimizer()
-
+        self.wrap_model_ddp()
         # Setup Wandb with comprehensive configuration
         self.setup_wandb(wandb_project, wandb_name)
 
@@ -1772,7 +1825,7 @@ class OptimizedUniRef50Trainer:
                     'loss': f'{loss:.4f}',
                     'lr': f'{self.scheduler.get_last_lr()[0]:.2e}',
                     'step': f'{step}/{self.cfg.training.n_iters}',
-                    'gpu_mem': f'{torch.cuda.memory_allocated()/1024**3:.1f}GB' if torch.cuda.is_available() else 'N/A'
+                    'device_mem': self._get_device_memory_str()
                 })
 
                 # Detailed logging
@@ -1915,8 +1968,29 @@ class OptimizedUniRef50Trainer:
 def main():
     """Main entry point."""
     import argparse
+    import os, socket
 
-    # Print startup banner
+    try:
+        from mpi4py import MPI
+        # Print startup banner
+        comm = MPI.COMM_WORLD
+        size = comm.Get_size()
+        rank = comm.Get_rank()
+        local_rank = os.environ.get('PALS_LOCAL_RANK', 0)
+        os.environ['RANK'] = str(rank)
+        os.environ['WORLD_SIZE'] = str(size)
+        MASTER_ADDR = socket.gethostname() if rank == 0 else None
+        MASTER_ADDR = comm.bcast(MASTER_ADDR, root=0)
+        os.environ['MASTER_ADDR'] = f"{MASTER_ADDR}.hsn.cm.aurora.alcf.anl.gov"
+        os.environ['MASTER_PORT'] = '2345'
+        print(f"DDP: Hi from rank {rank} of {size} with local rank {local_rank}. {MASTER_ADDR}")
+
+    except ImportError:
+        print("MPI not available, falling back to single node")
+        rank = 0
+        size = 1
+        local_rank = 0
+
     print("\n" + "="*80)
     print("🧬 OPTIMIZED UNIREF50 SEDD TRAINING")
     print("="*80)
@@ -1962,6 +2036,8 @@ def main():
             work_dir=args.work_dir,
             config_file=args.config,
             datafile=args.datafile,
+            rank=rank,
+            world_size=size,
             dev_id=args.device,
             seed=args.seed,
             force_fresh_start=args.fresh,
