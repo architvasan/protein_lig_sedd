@@ -1,0 +1,12 @@
+# Requirements for Aurora (Intel XPU) training
+# Install base requirements first: pip install -r requirements.txt
+
+# Intel XPU specific packages
+intel-extension-for-pytorch>=2.0.0
+oneccl_bindings_for_pytorch>=2.0.0
+
+# MPI for distributed training on Aurora
+mpi4py>=3.1.0
+
+# Additional HPC utilities
+psutil>=5.9.0

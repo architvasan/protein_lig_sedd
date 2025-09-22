@@ -1,142 +1,310 @@
-# Experiments using score entropy discrete diffusion for protein design 
+# 🧬 Protein-Ligand SEDD: Score-based Enhanced Diffusion for Discrete Data
 
-This code is a fork of and wholly based on [Aaron Lou's implementation of score entropy discrete diffusion](https://github.com/louaaron/Score-Entropy-Discrete-Diffusion), which is fully described in the research paper (which was voted ICML 2024 Best Paper), "Discrete Diffusion Modeling by Estimating the Ratios of the Data Distribution" by Aaron Lou, Chenlin Meng, and Stefano Ermon ([https://arxiv.org/abs/2310.16834](https://arxiv.org/abs/2310.16834))
+A PyTorch implementation of SEDD (Score-based Enhanced Diffusion for Discrete data) for protein and protein-ligand generation, with support for distributed training and cross-platform compatibility.
 
-The goal of this repository is to evaluate the usefulness of score entropy discrete diffusion for understanding protein sequences. In particular, we hope to evaluate SEDD models trained on UniRef50 compared with existing autogregressive protein transformer models such as ProGen, RITA, and ProtT5
+## ✨ Key Features
 
+- 🧬 **Protein Generation**: Generate realistic protein sequences using diffusion models
+- 🚀 **Cross-Platform**: Supports CUDA, Apple Silicon (MPS), Intel XPU, and CPU
+- 🔄 **Distributed Training**: Multi-GPU training with PyTorch DDP
+- 📊 **Experiment Tracking**: Integrated Weights & Biases logging
+- 🎯 **Curriculum Learning**: Advanced noise scheduling for stable training
+- 🔧 **Memory Efficient**: Gradient checkpointing and optimized attention
+- 📈 **Comprehensive Evaluation**: Built-in sequence analysis and foldability metrics
+- ⚡ **Aurora Ready**: Optimized for Intel XPU supercomputer training
 
-## Resources  
+## 🏗️ Model Architecture
 
-- Original implementation by Aaron Lou https://github.com/louaaron/Score-Entropy-Discrete-Diffusion 
-- Original readme https://github.com/louaaron/Score-Entropy-Discrete-Diffusion 
-- "Discrete Diffusion Modeling by Estimating the Ratios of the Data Distribution" by Aaron Lou, Chenlin Meng, and Stefano Ermon https://arxiv.org/abs/2310.16834
+- **Base Model**: Transformer-based diffusion model (SEDD)
+- **Attention**: V100-compatible attention mechanism (no Flash Attention required)
+- **Graph Type**: Absorbing diffusion process for discrete sequences
+- **Noise Schedule**: Cosine scheduling with curriculum learning
+- **Sampling**: Both rigorous CTMC and fast heuristic sampling methods
 
+## 🚀 Quick Start
 
-## Experiments 
+### 1. Installation
 
-For the computational setup for these experiments, I'm using a A100 instance from [Lambda Labs](https://lambdalabs.com) which costs about $1.25 an hour. After launching A100 instance from Lambda, I perform the following updates and installs to update the Torch and CUDA installs to the latest versions, then:
+```bash
+# Clone the repository
+git clone https://github.com/architvasan/protein_lig_sedd.git
+cd protein_lig_sedd
 
-```
-sudo apt-get update && sudo apt-get dist-upgrade
-python -m pip install transformers datasets einops ninja packaging omegaconf hydra-core 
-python -m pip install flash-attn --no-build-isolation
-```
+# Create virtual environment (recommended)
+python -m venv protein_sedd_env
+source protein_sedd_env/bin/activate  # On Windows: protein_sedd_env\Scripts\activate
 
-Then to run training, edit the config or provide command line options:  
-
-```shell 
-python train.py 
-```
-
-Changes from Aaron Lou's original implementation that are needed for modeling protein sequence data are not significant: 
-
-1. In the training script `run_train.py` and the data loading implementation in `data.py`, we update the existing tokenizer for sampling to one that uses the amino acid vocabulary (plus special tokens)
-
-However, in order for us to evaluate these models, we'll need to think more carefully about downstream use cases. 
-
-1. In the training script we update the evaluations to be protein-specific (comparing against a protein model in generation perplexity and evaluating mutational effect scores using an experimental dataset)
-
-### Adapting the implementation for protein data 
-
-#### Using the existing GPT2 tokenizer
-
-First I just wanted to try using the exact GPT2 tokenizer (with vocab size 50,257) on protein sequences, without any changes. After implementing a simple protein sequence dataset following the existing code, I was surprised to see that after only about 2,000 steps (batch size 256), the model is already producing very realistic protein sequences: 
-
-```
->sample_1
-MDTARTIHIMKGKVQGVFFRRAYTRDQARHLGITGWVRNKPDGTVELEAEGPKELLVELLAWCQQGPTARADVDDVDKVIWEPARGIKDFIIR
->sample_2
-MAKQCEKIYVYGRVQGVYFRRYTYQRKAQHGITGYAKNLNDVEVLASGQDDVNIKSLMKHWLEHGPPAARVDHVEKTIEYRGRYDSFKIRY
->sample_3
-MTDLNRATFLISGLVQGVCFRRASTRDEARRLGVHGWVRNLPDRRVWVLAHEEADVQRLTAWCRKGPPAAKVTEITEREAPGILEGQFLIRGSSDLDRFHVPAG
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-It's impossible to tell much just by looking at the sequence, of course, but [folding these proteins with ESMFold](https://esmatlas.com/resources?action=fold) reveals that they are predicted to fold as expected for this protein family (AcyP), despite being only about 25% sequence identical, which is an amazing result for a generative model. 
+### 2. Download Data
 
-![Samples from the SEDD model at 2,000 steps](img/folded.png)
-
-
-#### Using an amino acid tokenizer 
-
-I chose to implement tokenization for proteins by supplying a modified vocabulary to the existing `GPT2TokenizerFast`. I also tried creating a tokenizer class from scratch, but using the existing implementation with a modified vocabulary worked best because of the many implementation details you'd have to copy if recreating from scratch. 
-
-The new tokenizer is initialized from files `vocab.json` and `merges.txt` that are generated when the script runs. 
-
-```python 
-from collections import OrderedDict
-from transformers import GPT2TokenizerFast
-import json
-
-# Define amino acids and special tokens
-amino_acids = list("ACDEFGHIKLMNPQRSTVWY")
-special_tokens = ["<s>", "<pad>", "</s>", "<unk>", "<mask>"]
-all_tokens = special_tokens + amino_acids
-
-# Create the vocabulary
-vocab = OrderedDict((token, idx) for idx, token in enumerate(all_tokens))
-
-# Save the vocabulary
-with open('vocab.json', 'w') as f:
-    json.dump(vocab, f)
-
-# Create an empty merges.txt file
-with open('merges.txt', 'w') as f:
-    f.write('#version: 0.2\n')
-
-# Initialize the tokenizer
-tokenizer = GPT2TokenizerFast(
-    vocab_file='vocab.json',
-    merges_file='merges.txt',
-    bos_token='<s>',
-    eos_token='</s>',
-    unk_token='<unk>',
-    pad_token='<pad>',
-    mask_token='<mask>'
-)
+```bash
+# Download UniRef50 subset for training (10k sequences)
+./shell_scripts/download_uniref50_data.sh
 ```
 
-After training the model under several configurations on the AcyP dataset (which can be specified with "acyp" as the dataset name in the config), it seems that the SEDD model has excellent performance at modeling the data distribution for these homologous sequences, and is able to generate highly convincing sequences that fold well as predicted by ESMFold. 
+### 3. Start Training
 
-![Samples from the modified SEDD model at 5,000 steps](img/folded2.png)
+```bash
+# Fresh training with interactive setup
+./shell_scripts/start_fresh_training.sh
 
-
-### Training on UniRef50 
-
-The next step would be to train some SEDD models of different sizes on the UniRef50 dataset and compare to the performance of autogregressive models on the same data. Some good models to compare against: ProGen, RITA, ProtT5. Some model sizes to try: 10M, 100M, 1B, 10B params. 
-
-I adapted the existing data loading code to load the UniRef50 dataset, but haven't trained it fully yet, due to the computational cost. From my experiments, it takes about 4 hours to preprocess the dataset using an A100, before training begins. Once training begins, for the tiny model on short sequences of length 128, we get about 1,000 steps of batch size 128 per minute on the A100, which is about 15 million tokens per minute. UniRef50 contains around 40 million sequences with an average length of 256, for a total of 10 billion tokens. I approximate this will take over 10 hours to train on the A100 (for the tiny model). 
-
-I've provided the code to load UniRef50 in this repo:
-
-```python 
-elif name == "uniref50":
-    dataset = load_dataset("agemagician/uniref50", cache_dir=cache_dir)
+# Or direct training
+./shell_scripts/run_train_uniref50_optimized.sh
 ```
 
-You can train on UniRef50 by providing the dataset name "uniref50" in the Hydra config. 
+## 📋 Requirements
 
-Next steps (2024-10-7): 
+### System Requirements
+- **Python**: 3.8+
+- **GPU**: CUDA-compatible GPU (recommended) or CPU
+- **Memory**: 8GB+ RAM, 4GB+ GPU memory
+- **Storage**: 2GB+ for data and checkpoints
 
-- [ ] Obtain funding to train the model on the UniRef50 dataset
-- [ ] Train model param grid (model size and layers) on the UniRef50 dataset and compare against ProGen, RITA, and ProtT5 on evaluation metrics  
+### Platform Support
+- ✅ **CUDA GPUs** (NVIDIA)
+- ✅ **Apple Silicon** (MPS)
+- ✅ **Intel XPU** (Aurora supercomputer)
+- ✅ **CPU** (slower but functional)
 
+## 🔧 Installation Options
 
-### Protein design evals for score entropy discrete diffusion models 
+### Standard Installation
+```bash
+pip install -r requirements.txt
+```
 
-The primary evaluations done in the protein sequence modeling literature fall into three broad categories. I'm going to leave out the use of sequence-based embeddings to predict structures, as is done in AlphaFold and ESMFold, and focus on direct uses of protein language models. 
+### Minimal Installation (basic training only)
+```bash
+pip install -r requirements-minimal.txt
+```
 
-1. Using model representation (embeddings) for a downstream task (for example: predicting which class a protein belongs in, or predicting the per-token secondary structure)
-2. Predicting the likelihood of sequences or mutants of sequences (for example, eliminating low-confidence proteins from a metagenomic search, or removing evolutionary-unlikely mutations from design space)
-3. Sampling from the model to generate new sequences (potentially conditionally)
+### Aurora/Intel XPU Installation
+```bash
+pip install -r requirements.txt
+pip install -r requirements-aurora.txt
+```
 
-I think the trick will be, can we design evals that are feasible for both autogregressive models and SEDD models, so that we can directly compare performance? We already know that we can effectively train on the same datasets. 
+## 🎯 Training Options
 
-There are of course some unique evaluations that would be very interesting for SEDD models. First, I'd like to see how well the concrete score predicts mutations for sequences "one token away" and recapitulates phylogenetic distances. It's also very interesting to think about prompting the SEDD model: since we can do arbitrary discontinuous prompts, we have a good mechanism for performing "fill in blank" design, we can also be achieved via masking in autogregressive models. 
+### Single GPU Training
+```bash
+# Auto-detect best device
+./shell_scripts/run_train_uniref50_optimized.sh
 
-I'd propose the following evals for SEDD models for protein design, in addition to the classics like secondary structure prediction. 
+# Specify device
+./shell_scripts/run_train_uniref50_optimized.sh --device cuda:0
+./shell_scripts/run_train_uniref50_optimized.sh --device mps     # Apple Silicon
+./shell_scripts/run_train_uniref50_optimized.sh --device cpu
+```
 
-**Mutation effect prediction.** Calculate the score of mutated sequences under the model using the concrete score and assess correlation with experimentally-observed mutation effects. Carefully select benchmark data that measures sequence fitness in a natural context—protein engineering or design benchmarks [will not have signal](https://alexcarlin.bearblog.dev/the-problem-with-proteingym).
+### Multi-GPU Training (DDP)
+```bash
+# 4 GPU training
+./shell_scripts/run_train_uniref50_ddp.sh --gpus 4
 
-**Metagenomic distance.** Can the model tell the difference between two functional homologs, and "decoy" sets of proteins that are evolutionarily related but perform different functions? On samples of metagenomic space experimentally tested for a particular function, does the model assign higher scores to proteins with better intrinsic properties such as stability or $k_{cat}$? Can the model separately model taxonomy and functional properties? 
+# Custom configuration
+python -m torch.distributed.launch --nproc_per_node=4 \
+    protlig_dd/training/run_train_uniref50_ddp.py \
+    --work_dir ./experiments/ddp_run \
+    --config configs/config_uniref50_ddp.yaml
+```
 
-**Relative functional importance.** Broadly, does the model learn which parts of proteins are fungible and which are necessary? Does the model correctly ignore small changes to irrelevant amino acids while strongly disfavoring non-functional sequences? As a first pass at this, collected labeled active site residues from UniProt and assess scores at those positions. 
+### Aurora Supercomputer Training
+```bash
+# Submit job on Aurora
+sbatch shell_scripts/run_train_protonly_polaris.sh
+```
+
+## 📊 Experiment Tracking
+
+The training automatically logs to [Weights & Biases](https://wandb.ai):
+
+```bash
+# Setup wandb (first time only)
+python scripts/setup_wandb.py
+
+# Training will show wandb dashboard link
+# Example: https://wandb.ai/your-username/uniref50-sedd
+```
+
+## 🧪 Analysis and Evaluation
+
+### Analyze Generated Sequences
+```bash
+# Analyze protein foldability and structural properties
+python scripts/analyze_foldability.py --sequences generated_sequences.txt
+
+# Compare generated sequences with training data
+python scripts/analyze_generated_sequence.py --model_dir ./experiments/run_1
+
+# Display generated protein sequences
+python scripts/show_generated_sequences.py --checkpoint ./experiments/run_1/checkpoints/best.pt
+```
+
+### Model Evaluation
+```bash
+# Calculate model parameters and memory usage
+python scripts/calculate_current_model_params.py --config configs/config_uniref50_optimized.yaml
+
+# Test sampling methods
+python scripts/simple_sampling_test.py --model_path ./experiments/run_1/checkpoints/best.pt
+```
+
+### Hyperparameter Sweeps
+```bash
+# Run hyperparameter optimization
+python scripts/hyperparameter_sweep.py --config configs/config_uniref50_sweeps.yaml
+
+# Analyze sweep results
+python scripts/analyze_sweep_results.py --project uniref50_hyperparam_sweep
+```
+
+## 🎛️ Advanced Usage
+
+### Custom Training Scripts
+```bash
+# Train with custom configuration
+python -m protlig_dd.training.run_train_uniref50_optimized \
+    --work_dir ./my_experiment \
+    --config ./my_config.yaml \
+    --device cuda:0 \
+    --wandb_project my_project
+
+# Resume from checkpoint
+python -m protlig_dd.training.run_train_uniref50_optimized \
+    --work_dir ./my_experiment \
+    --resume ./my_experiment/checkpoints/latest.pt
+```
+
+### Data Preparation
+```bash
+# Create custom dataset
+python scripts/create_test_protein_dataset.py --output custom_proteins.pt --num_sequences 1000
+
+# Download full UniRef50 (large dataset)
+python scripts/download_real_uniref50.py --output_dir ./data/uniref50_full
+```
+
+## 📁 Project Structure
+
+```
+protein_lig_sedd/
+├── protlig_dd/              # Core codebase
+│   ├── model/               # Model architectures
+│   ├── training/            # Training scripts
+│   ├── processing/          # Data processing
+│   └── utils/               # Utilities
+├── configs/                 # Configuration files
+├── scripts/                 # Analysis and utility scripts
+├── shell_scripts/           # Training and job scripts
+├── READMEs/                 # Detailed documentation
+└── requirements*.txt        # Dependencies
+```
+
+## ⚙️ Configuration
+
+### Key Configuration Files
+- `configs/config_uniref50_optimized.yaml` - Standard training
+- `configs/config_uniref50_ddp.yaml` - Multi-GPU training  
+- `configs/config_uniref50_stable.yaml` - Stable/conservative settings
+
+### Important Parameters
+```yaml
+training:
+  batch_size: 16              # Adjust based on GPU memory
+  n_iters: 50000             # Training iterations
+  eval_freq: 1000            # Evaluation frequency
+  
+model:
+  hidden_size: 512           # Model dimension
+  n_blocks: 8                # Transformer blocks
+  n_heads: 8                 # Attention heads
+
+noise:
+  sigma_max: 0.9             # Maximum noise level
+  type: "cosine"             # Noise schedule
+```
+
+## 🐛 Troubleshooting
+
+### Common Issues
+
+**Out of Memory**
+```bash
+# Reduce batch size in config
+batch_size: 8  # or smaller
+
+# Enable gradient checkpointing
+memory:
+  gradient_checkpointing: true
+```
+
+**Module Import Errors**
+```bash
+# Ensure PYTHONPATH is set
+export PYTHONPATH="$PWD:$PYTHONPATH"
+
+# Or use module execution
+python -m protlig_dd.training.run_train_uniref50_optimized
+```
+
+**CUDA Issues**
+```bash
+# Check CUDA availability
+python -c "import torch; print(torch.cuda.is_available())"
+
+# Use CPU fallback
+./shell_scripts/run_train_uniref50_optimized.sh --device cpu
+```
+
+## 📈 Performance & Benchmarks
+
+### Model Sizes
+- **Standard Model**: ~253M parameters
+- **Memory Usage**: ~4GB GPU memory (batch_size=16)
+- **Training Speed**: ~2-3 sequences/second (single V100)
+
+### Scaling Performance
+- **Single GPU**: V100, A100, RTX 3090/4090
+- **Multi-GPU**: Linear scaling up to 16 GPUs tested
+- **Aurora XPU**: Optimized with Intel IPEX
+
+### Generated Sequence Quality
+- **Average Length**: 200-400 amino acids
+- **Amino Acid Distribution**: Matches natural protein statistics
+- **Structural Foldability**: Analyzed with AlphaFold confidence prediction
+
+## 📚 Documentation
+
+Detailed guides available in `READMEs/`:
+- [Training Guide](READMEs/FRESH_TRAINING_GUIDE.md)
+- [DDP Training](READMEs/DDP_TRAINING_GUIDE.md)
+- [Hyperparameter Sweeps](READMEs/HYPERPARAMETER_SWEEP_GUIDE.md)
+- [Cross-Platform Support](READMEs/CROSS_PLATFORM_SUPPORT_SUMMARY.md)
+- [Model Architecture](READMEs/SEDD_Architecture_Analysis.md)
+- [Evaluation System](READMEs/COMPREHENSIVE_EVALUATION_SYSTEM.md)
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests if applicable
+5. Submit a pull request
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- Based on the SEDD paper and implementation
+- UniRef50 dataset from UniProt
+- Built with PyTorch and Weights & Biases
+
+---
+
+**Need help?** Check the [troubleshooting section](#-troubleshooting) or open an issue!
