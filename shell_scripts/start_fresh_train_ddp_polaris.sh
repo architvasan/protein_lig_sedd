@@ -86,7 +86,8 @@ echo "   Walltime: $WALLTIME"
 echo ""
 
 echo "loading modules"
-module load frameworks
+module use /soft/modulefiles
+module load conda
 source $VENV_PATH/bin/activate
 
 # Create work directory
@@ -169,9 +170,10 @@ if [ "$EXECUTION_MODE" = "interactive" ]; then
     export MASTER_PORT=$MASTER_PORT
 
     # Run DDP training directly
-    mpiexec -n $NUM_GPUS -ppn $PPN \
-        $AFFINITY_FILE \
-        python -m protlig_dd.training.run_train_uniref_ddp_aurora \
+    #mpiexec -n $NUM_GPUS -ppn $PPN \
+    torchrun --nnodes=1 --nproc_per_node=4 --rdzv_id=100 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR:29400 \ 
+    CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.run \
+        protlig_dd/training/run_train_uniref_ddp_polaris.py \
         --work_dir "$WORK_DIR" \
         --config "$CONFIG_FILE" \
         --datafile "$DATAFILE" \
