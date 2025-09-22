@@ -110,8 +110,11 @@ class OptimizedUniRef50Trainer:
         torch.manual_seed(self.seed)
         np.random.seed(self.seed)
 
-        if self.use_ddp: 
-            self.rank, self.device = setup_ddp_polaris(self.rank, self.world_size)
+        if self.use_ddp:
+            self.rank, device_id = setup_ddp_polaris(self.rank, self.world_size)
+            self.device = torch.device(f"cuda:{device_id}")
+        else:
+            self.device = torch.device(self.dev_id)
         print(f"{self.rank=}")
         print(f"{self.device=}")
         # Setup device with cross-platform compatibility
@@ -432,11 +435,18 @@ class OptimizedUniRef50Trainer:
         print("Optimizer ready.")
 
     def wrap_model_ddp(self):
-        self.model_ddp = DDP(
-                            self.model,
-                            device_ids=[self.rank],
-                            output_device=self.rank,
-                            find_unused_parameters=True)
+        if self.use_ddp:
+            # Get the local device ID (not the global rank)
+            local_device_id = int(str(self.device).split(':')[1])
+            self.model_ddp = DDP(
+                                self.model,
+                                device_ids=[local_device_id],
+                                output_device=local_device_id,
+                                find_unused_parameters=True)
+            print(f"✅ Model wrapped with DDP on device {local_device_id}")
+        else:
+            self.model_ddp = self.model
+            print("✅ Using model without DDP wrapper")
 
     def setup_wandb(self, project_name: str, run_name: str):
         """Setup Wandb with comprehensive logging configuration."""
@@ -627,8 +637,10 @@ class OptimizedUniRef50Trainer:
 
                             # UniRef50 model expects (indices, sigma) format
                             # Use protein_indices as the main input for protein_only mode
+                            # Use DDP model if available
+                            model_to_use = self.model_ddp if hasattr(self, 'model_ddp') and self.use_ddp else self.model
                             if mode == 'protein_only':
-                                return self.model(protein_indices, timesteps)
+                                return model_to_use(protein_indices, timesteps)
                             else:
                                 raise ValueError(f"UniRef50 model only supports protein_only mode, got {mode}")
 
@@ -639,8 +651,9 @@ class OptimizedUniRef50Trainer:
                                 timesteps = sigma
                             else:
                                 timesteps = sigma * torch.ones(x.shape[0], device=x.device)
-                            # Call the model with proper interface
-                            return self.model(x, timesteps)
+                            # Call the model with proper interface (use DDP model if available)
+                            model_to_use = self.model_ddp if hasattr(self, 'model_ddp') and self.use_ddp else self.model
+                            return model_to_use(x, timesteps)
                         else:
                             raise ValueError(f"ModelWrapper called with invalid arguments. Got x={x}, sigma={sigma}, kwargs={list(kwargs.keys())}")
 
@@ -742,16 +755,17 @@ class OptimizedUniRef50Trainer:
                         # Compute timestep (from 1.0 to 0.0)
                         t = torch.tensor([1.0 - step / num_diffusion_steps], device=self.device)
 
-                        # Get model predictions
+                        # Get model predictions (use DDP model)
+                        model_to_use = self.model_ddp if self.use_ddp else self.model
                         device_type = str(self.device).split(':')[0]
                         if device_type == 'xpu':
                             with torch.xpu.amp.autocast(enabled=False):
-                                logits = self.model(sample, t)
+                                logits = model_to_use(sample, t)
                         elif device_type == 'cuda':
                             with torch.cuda.amp.autocast(enabled=False):
-                                logits = self.model(sample, t)
+                                logits = model_to_use(sample, t)
                         else:
-                            logits = self.model(sample, t)
+                            logits = model_to_use(sample, t)
 
                         # Temperature sampling
                         probs = torch.softmax(logits / temperature, dim=-1)
@@ -1460,20 +1474,23 @@ class OptimizedUniRef50Trainer:
         # Forward pass with device-aware autocast and shape validation
         try:
             device_type = str(self.device).split(':')[0]
+            # Use DDP model for training
+            model_to_use = self.model_ddp if self.use_ddp else self.model
+
             if self.use_amp and device_type == 'xpu':
                 with torch.xpu.amp.autocast():
-                    log_score = self.model(perturbed_batch, sigma)
+                    log_score = model_to_use(perturbed_batch, sigma)
                     loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
             elif self.use_amp and device_type == 'cuda':
                 with torch.cuda.amp.autocast():
-                    log_score = self.model(perturbed_batch, sigma)
+                    log_score = model_to_use(perturbed_batch, sigma)
                     loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
 
                     # Weight by dsigma for better training dynamics
                     loss = (dsigma[:, None] * loss).mean()
             else:
                 # No autocast for CPU/MPS
-                log_score = self.model(perturbed_batch, sigma)
+                log_score = model_to_use(perturbed_batch, sigma)
                 loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
 
                 # Weight by dsigma for better training dynamics
@@ -1491,20 +1508,21 @@ class OptimizedUniRef50Trainer:
                     perturbed_batch = perturbed_batch.view(perturbed_batch.shape[0], -1)
                     print(f"   Fixed shape: {perturbed_batch.shape}")
 
-                    # Retry the forward pass
+                    # Retry the forward pass with DDP model
+                    model_to_use = self.model_ddp if self.use_ddp else self.model
                     device_type = str(self.device).split(':')[0]
                     if self.use_amp and device_type == 'xpu':
                         with torch.xpu.amp.autocast():
-                            log_score = self.model(perturbed_batch, sigma)
+                            log_score = model_to_use(perturbed_batch, sigma)
                             loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
                             loss = (dsigma[:, None] * loss).mean()
                     elif self.use_amp and device_type == 'cuda':
                         with torch.cuda.amp.autocast():
-                            log_score = self.model(perturbed_batch, sigma)
+                            log_score = model_to_use(perturbed_batch, sigma)
                             loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
                             loss = (dsigma[:, None] * loss).mean()
                     else:
-                        log_score = self.model(perturbed_batch, sigma)
+                        log_score = model_to_use(perturbed_batch, sigma)
                         loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
                         loss = (dsigma[:, None] * loss).mean()
                 else:
@@ -1588,8 +1606,9 @@ class OptimizedUniRef50Trainer:
             # Set sigma=0 (no noise condition)
             sigma = torch.zeros(batch.shape[0], device=self.device)
 
-            # Forward pass with no noise - get score
-            score = self.model(batch, sigma)
+            # Forward pass with no noise - get score (use DDP model for evaluation too)
+            model_to_use = self.model_ddp if self.use_ddp else self.model
+            score = model_to_use(batch, sigma)
 
             # Use the graph's score_entropy method for proper loss computation
             # For reconstruction: x (noisy) = x0 (clean) since sigma=0
@@ -1618,8 +1637,9 @@ class OptimizedUniRef50Trainer:
                 # Sample noisy version at this noise level
                 x_noisy = self.graph.sample(batch, sigma)
 
-                # Forward pass at this specific noise level - get score
-                score = self.model(x_noisy, sigma)
+                # Forward pass at this specific noise level - get score (use DDP model)
+                model_to_use = self.model_ddp if self.use_ddp else self.model
+                score = model_to_use(x_noisy, sigma)
 
                 # Use proper score entropy for loss computation
                 entropy = self.graph.score_entropy(score, sigma, x_noisy, batch)
@@ -1658,8 +1678,9 @@ class OptimizedUniRef50Trainer:
                     t = torch.rand(batch.shape[0], device=self.device)
                     sigma = self.noise(t)[0]
 
-                    # Forward pass
-                    logits = self.model(batch, sigma)
+                    # Forward pass (use DDP model)
+                    model_to_use = self.model_ddp if self.use_ddp else self.model
+                    logits = model_to_use(batch, sigma)
 
                     # Simple cross-entropy loss
                     loss = F.cross_entropy(
