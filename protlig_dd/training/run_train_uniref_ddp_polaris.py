@@ -1951,7 +1951,13 @@ class OptimizedUniRef50Trainer:
 
             # Use the graph's score_entropy method for proper loss computation
             # For reconstruction: x (noisy) = x0 (clean) since sigma=0
-            entropy = self.graph.score_entropy(score, sigma, batch, batch)
+            # Expand sigma to match sequence dimension if needed
+            if len(sigma.shape) == 1 and len(batch.shape) == 2:
+                sigma_expanded = sigma[:, None].expand(-1, batch.shape[1])
+            else:
+                sigma_expanded = sigma
+
+            entropy = self.graph.score_entropy(score, sigma_expanded, batch, batch)
 
             # Return mean entropy as reconstruction loss
             recon_loss = entropy.mean()
@@ -1973,15 +1979,21 @@ class OptimizedUniRef50Trainer:
                 # Create sigma tensor for this noise level
                 sigma = torch.full((batch.shape[0],), noise_level, device=self.device)
 
-                # Sample noisy version at this noise level
-                x_noisy = self.graph.sample(batch, sigma)
+                # Sample noisy version at this noise level using sample_transition
+                x_noisy = self.graph.sample_transition(batch, sigma)
 
                 # Forward pass at this specific noise level - get score (use DDP model)
                 model_to_use = self.model_ddp if self.use_ddp else self.model
                 score = model_to_use(x_noisy, sigma)
 
                 # Use proper score entropy for loss computation
-                entropy = self.graph.score_entropy(score, sigma, x_noisy, batch)
+                # Expand sigma to match sequence dimension if needed
+                if len(sigma.shape) == 1 and len(batch.shape) == 2:
+                    sigma_expanded = sigma[:, None].expand(-1, batch.shape[1])
+                else:
+                    sigma_expanded = sigma
+
+                entropy = self.graph.score_entropy(score, sigma_expanded, x_noisy, batch)
 
                 # Mean entropy as loss
                 loss = entropy.mean()
