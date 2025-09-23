@@ -2224,8 +2224,49 @@ class OptimizedUniRef50Trainer:
                     running_loss = 0.0
                     log_interval_start_time = time.time()
 
+                # Log reconstruction and fixed noise losses every 100 steps
+                if step % self.cfg.training.log_freq * 5 == 0 and step > 0:
+                    print(f"🔍 Computing reconstruction and fixed noise losses at step {step}...")
+                    try:
+                        # Get a single batch for loss computation
+                        sample_batch = next(iter(self.val_loader))
+                        sample_batch = sample_batch.to(self.device)
+
+                        # Compute reconstruction loss (t=0, no noise)
+                        recon_loss = self.eval_reconstruction_loss(sample_batch)
+
+                        # Compute fixed noise level losses
+                        fixed_noise_metrics = self.eval_fixed_noise_levels(sample_batch)
+
+                        # Log to wandb (only on rank 0)
+                        if self.rank == 0:
+                            metrics_to_log = {
+                                'train/step': step,
+                                'train/epoch': epoch,
+                            }
+
+                            if recon_loss is not None:
+                                metrics_to_log['train/reconstruction_loss'] = recon_loss
+                                print(f"   📊 Reconstruction Loss: {recon_loss:.4f}")
+
+                            else:
+                                print("   ⚠️  Reconstruction loss is None")
+
+                            for noise_key, noise_value in fixed_noise_metrics.items():
+                                if noise_value is not None:
+                                    metrics_to_log[f'train/{noise_key}'] = noise_value
+                                    print(f"   📊 {noise_key}: {noise_value:.4f}")
+
+                                else:
+                                    print(f"   ⚠️  {noise_key}: None (skipped)")    
+                            wandb.log(metrics_to_log, step=step)
+
+                    except Exception as e:
+                        print(f"⚠️  Warning: Could not compute reconstruction/fixed noise losses: {e}")
+                        # Continue training even if logging fails
+
                 # Quick generation test (more frequent than comprehensive evaluation)
-                quick_gen_freq = getattr(self.cfg.training, 'quick_gen_freq', self.cfg.training.log_freq * 2)
+                quick_gen_freq = getattr(self.cfg.training, 'quick_gen_freq', self.cfg.training.log_freq * 10)
                 if step % quick_gen_freq == 0 and step > 0:
                     self.quick_generation_test(step, epoch)
 
