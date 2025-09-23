@@ -4,7 +4,7 @@ from datasets import load_dataset
 from itertools import chain
 import numpy as np
 import tempfile
-from Bio import SeqIO
+#from Bio import SeqIO
 import requests
 import json
 from datasets import Dataset

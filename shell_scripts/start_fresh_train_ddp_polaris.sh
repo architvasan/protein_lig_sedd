@@ -30,7 +30,7 @@
 # Training Configuration
 WORK_DIR="./experiments/polaris_ddp_$(date +%Y%m%d_%H%M%S)"
 CONFIG_FILE="configs/config_uniref50_hpo4_ddp.yaml"
-DATAFILE="./input_data/subset_uniref50.pt"
+DATAFILE="./input_data/processed_uniref50.pt"
 WANDB_PROJECT="uniref50_polaris_ddp"
 DEVICE="cuda"  # Polaris uses NVIDIA CUDA
 SEED=42
@@ -45,7 +45,7 @@ BACKEND="nccl"                # Use NCCL backend for NVIDIA GPUs
 JOB_NAME="polaris_sedd_ddp"
 QUEUE="debug"                # Polaris queue name
 WALLTIME="01:00:00"          # 2 hours
-NODES=1                      # Number of nodes
+NODES=2                      # Number of nodes
 PPN=4                        # Processes per node (should match NUM_GPUS)
 
 # Environment
@@ -67,6 +67,8 @@ CHECKPOINT_ACTION="remove"   # Options: "remove", "backup", "ignore", "cancel"
 #############################################
 # 🚀 SCRIPT EXECUTION - DO NOT MODIFY BELOW
 #############################################
+
+
 
 echo "🚀 Polaris DDP FRESH TRAINING"
 echo "============================"
@@ -167,24 +169,48 @@ if [ "$EXECUTION_MODE" = "interactive" ]; then
 
     # Set environment variables
     export PYTHONPATH="$VENV_PATH/bin/python"#"$VENV_PATH:$PYTHONPATH"
-    export MASTER_PORT=$MASTER_PORT
+    #export MASTER_PORT=29500
 
     # Run DDP training directly
     # Set MASTER_ADDR for torchrun
-    export MASTER_ADDR=localhost
-    export MASTER_PORT=$MASTER_PORT
+    #export MASTER_ADDR=localhost
+    #export MASTER_ADDR=$(getent hosts $(head -1 $PBS_NODEFILE) | awk '{print $1}')
+    #export MASTER_PORT=$MASTER_PORT
+    # In your job script, before running Python
+    #export MASTER_ADDR=$(head -1 $PBS_NODEFILE)
+    #export MASTER_PORT=29500
+    #export WORLD_SIZE=$(wc -l < $PBS_NODEFILE)
+    #export RANK=$PBS_O_WORKDIR
+
+    #export NCCL_SOCKET_FAMILY=AF_INET
+    #export NCCL_NET_GDR_LEVEL=PHB
+    #export NCCL_CROSS_NIC=1
+    #export NCCL_COLLNET_ENABLE=1
+    #export NCCL_NET="AWS Libfabric"
+    #export LD_LIBRARY_PATH=/soft/libraries/aws-ofi-nccl/v1.9.1-aws/lib:$LD_LIBRARY_PATH
+    #export LD_LIBRARY_PATH=/soft/libraries/hwloc/lib/:$LD_LIBRARY_PATH
+    #export FI_CXI_DISABLE_HOST_REGISTER=1
+    #export FI_MR_CACHE_MONITOR=userfaultfd
+    #export FI_CXI_DEFAULT_CQ_SIZE=131072
 
     # Run DDP training with torchrun
-    CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.run \
-        --nnodes=1 \
-        --nproc_per_node=$NUM_GPUS \
-        --rdzv_id=100 \
-        --rdzv_backend=c10d \
-        --rdzv_endpoint=localhost:$MASTER_PORT \
-        protlig_dd/training/run_train_uniref_ddp_polaris.py \
+    #$VENV_PATH/bin/python -m torch.distributed.run \
+        #--nnodes=$NODES \
+        #--nproc_per_node=$PPN \
+        #--rdzv_id=100 \
+        #--rdzv_backend=c10d \
+        #--rdzv_endpoint=localhost:$MASTER_PORT \
+        #unset NCCL_NET_GDR_LEVEL NCCL_CROSS_NIC NCCL_COLLNET_ENABLE NCCL_NET
+
+        mpirun -np 8 -ppn 4 \
+        --hostfile $PBS_NODEFILE \
+        --cpu-bind depth -d 16 \
+        ./shell_scripts/set_affinity_gpu_polaris.sh \
+        $VENV_PATH/bin/python protlig_dd/training/run_train_uniref_ddp_polaris.py \
         --work_dir "$WORK_DIR" \
         --config "$CONFIG_FILE" \
         --datafile "$DATAFILE" \
+        --tokenize_on_fly \
         --wandb_project "$WANDB_PROJECT" \
         --wandb_name "$RUN_NAME" \
         --device "$DEVICE" \

@@ -3308,3 +3308,5 @@ downloading.err
 generated_samples/
 hyperparam_experiments/
 pldd_venv
+test_mpi.err
+test_torchrun.sh
