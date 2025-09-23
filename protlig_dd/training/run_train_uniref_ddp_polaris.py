@@ -1939,18 +1939,22 @@ class OptimizedUniRef50Trainer:
         return loss.item() * self.cfg.training.accum, step_time, additional_metrics
 
     def eval_reconstruction_loss(self, batch):
-        """Evaluate model at t=0 (no noise) - pure reconstruction task using proper score entropy."""
+        """Evaluate model at very low noise - approximates reconstruction task."""
         try:
             print("calculating recon loss")
-            # Set sigma=0 (no noise condition)
-            sigma = torch.zeros(batch.shape[0], device=self.device)
+            # Use very small sigma instead of exactly 0 to avoid numerical issues
+            # This approximates the reconstruction task while keeping score_entropy meaningful
+            sigma = torch.full((batch.shape[0],), 1e-5, device=self.device)
 
-            # Forward pass with no noise - get score (use DDP model for evaluation too)
+            # Get dsigma for proper weighting (similar to training loss)
+            t = torch.full((batch.shape[0],), 1e-5, device=self.device)
+            _, dsigma = self.noise(t)
+
+            # Forward pass with minimal noise - get score (use DDP model for evaluation too)
             model_to_use = self.model_ddp if self.use_ddp else self.model
             score = model_to_use(batch, sigma)
 
             # Use the graph's score_entropy method for proper loss computation
-            # For reconstruction: x (noisy) = x0 (clean) since sigma=0
             # Expand sigma to match sequence dimension if needed
             if len(sigma.shape) == 1 and len(batch.shape) == 2:
                 sigma_expanded = sigma[:, None].expand(-1, batch.shape[1])
@@ -1959,10 +1963,10 @@ class OptimizedUniRef50Trainer:
 
             entropy = self.graph.score_entropy(score, sigma_expanded, batch, batch)
 
-            # Return mean entropy as reconstruction loss
-            recon_loss = entropy.mean()
+            # Weight by dsigma similar to training loss for consistency
+            weighted_entropy = (dsigma[:, None] * entropy).mean()
 
-            return recon_loss.item()
+            return weighted_entropy.item()
 
         except Exception as e:
             print(f"Warning: Could not compute reconstruction loss: {e}")
@@ -2244,11 +2248,15 @@ class OptimizedUniRef50Trainer:
                         sample_batch = next(iter(self.val_loader))
                         sample_batch = sample_batch.to(self.device)
 
+                        # Use smaller batch size to avoid OOM - take first 4 samples
+                        small_batch_size = min(4, sample_batch.shape[0])
+                        small_batch = sample_batch[:small_batch_size]
+
                         # Compute reconstruction loss (t=0, no noise)
-                        recon_loss = self.eval_reconstruction_loss(sample_batch)
+                        recon_loss = self.eval_reconstruction_loss(small_batch)
 
                         # Compute fixed noise level losses
-                        fixed_noise_metrics = self.eval_fixed_noise_levels(sample_batch)
+                        fixed_noise_metrics = self.eval_fixed_noise_levels(small_batch)
 
                         # Log to wandb (only on rank 0)
                         if self.rank == 0:
