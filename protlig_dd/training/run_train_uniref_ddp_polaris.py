@@ -1418,6 +1418,10 @@ class OptimizedUniRef50Trainer:
             # 1. Validation loss
             print("📊 Computing validation loss...")
             val_loss, recon_loss, fixed_noise_metrics = self.validate_model()
+            print(f"   Validation Loss: {val_loss:.4f}"
+                  f"   Reconstruction Loss: {recon_loss:.4f}" if recon_loss is not None else ""
+                  f"   Fixed Noise Metrics: {fixed_noise_metrics}" if fixed_noise_metrics else "" 
+                )
 
             # 2. Generate sequences using specified method
             print(f"🧬 Generating protein sequences using {sampling_method} method...")
@@ -1914,6 +1918,7 @@ class OptimizedUniRef50Trainer:
     def eval_reconstruction_loss(self, batch):
         """Evaluate model at t=0 (no noise) - pure reconstruction task using proper score entropy."""
         try:
+            print("calculating recon loss")
             # Set sigma=0 (no noise condition)
             sigma = torch.zeros(batch.shape[0], device=self.device)
 
@@ -2016,6 +2021,7 @@ class OptimizedUniRef50Trainer:
 
         self.model.train()
 
+        print(recon_losses)
         # Average all metrics
         avg_val_loss = np.mean(val_losses) if val_losses else float('inf')
         avg_recon_loss = np.mean(recon_losses) if recon_losses else None
