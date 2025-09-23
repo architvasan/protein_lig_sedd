@@ -1942,12 +1942,15 @@ class OptimizedUniRef50Trainer:
         """Evaluate model at very low timestep - approximates reconstruction task."""
         try:
             print("calculating recon loss")
-            # Use very small timestep instead of exactly 0 to avoid numerical issues
+            # Use small timestep that gives meaningful dsigma (above noise minimum)
             # This approximates the reconstruction task while keeping score_entropy meaningful
-            t = torch.full((batch.shape[0],), 1e-5, device=self.device)
+            t = torch.full((batch.shape[0],), 0.01, device=self.device)
 
             # Get sigma and dsigma from noise scheduler (proper way)
             sigma, dsigma = self.noise(t)
+
+            # Debug print to see what we're getting
+            print(f"Reconstruction: t={t[0]:.6f}, sigma={sigma.mean():.6f}, dsigma={dsigma.mean():.6f}")
 
             # Forward pass with minimal noise - get score (use DDP model for evaluation too)
             model_to_use = self.model_ddp if self.use_ddp else self.model
@@ -1964,6 +1967,9 @@ class OptimizedUniRef50Trainer:
 
             # Weight by dsigma similar to training loss for consistency
             weighted_entropy = (dsigma[:, None] * entropy).mean()
+
+            # Debug print to see final values
+            print(f"Reconstruction: entropy_mean={entropy.mean():.6f}, weighted_entropy={weighted_entropy:.6f}")
 
             return weighted_entropy.item()
 
