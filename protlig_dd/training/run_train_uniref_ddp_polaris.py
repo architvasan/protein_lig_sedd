@@ -1939,16 +1939,15 @@ class OptimizedUniRef50Trainer:
         return loss.item() * self.cfg.training.accum, step_time, additional_metrics
 
     def eval_reconstruction_loss(self, batch):
-        """Evaluate model at very low noise - approximates reconstruction task."""
+        """Evaluate model at very low timestep - approximates reconstruction task."""
         try:
             print("calculating recon loss")
-            # Use very small sigma instead of exactly 0 to avoid numerical issues
+            # Use very small timestep instead of exactly 0 to avoid numerical issues
             # This approximates the reconstruction task while keeping score_entropy meaningful
-            sigma = torch.full((batch.shape[0],), 1e-5, device=self.device)
-
-            # Get dsigma for proper weighting (similar to training loss)
             t = torch.full((batch.shape[0],), 1e-5, device=self.device)
-            _, dsigma = self.noise(t)
+
+            # Get sigma and dsigma from noise scheduler (proper way)
+            sigma, dsigma = self.noise(t)
 
             # Forward pass with minimal noise - get score (use DDP model for evaluation too)
             model_to_use = self.model_ddp if self.use_ddp else self.model
@@ -1976,12 +1975,14 @@ class OptimizedUniRef50Trainer:
         """Evaluate at specific noise levels regardless of curriculum using proper score entropy."""
         try:
             results = {}
-            # Fixed noise levels to always test (independent of curriculum)
-            fixed_levels = [0.1, 0.3, 0.5, 0.7, 0.9]
+            # Fixed timesteps to always test (independent of curriculum)
+            # These correspond to different points in the diffusion process
+            fixed_timesteps = [0.1, 0.3, 0.5, 0.7, 0.9]
 
-            for noise_level in fixed_levels:
-                # Create sigma tensor for this noise level
-                sigma = torch.full((batch.shape[0],), noise_level, device=self.device)
+            for timestep in fixed_timesteps:
+                # Use noise scheduler to get sigma and dsigma for this timestep
+                t = torch.full((batch.shape[0],), timestep, device=self.device)
+                sigma, dsigma = self.noise(t)
 
                 # Sample noisy version at this noise level using sample_transition
                 x_noisy = self.graph.sample_transition(batch, sigma)
@@ -1999,10 +2000,13 @@ class OptimizedUniRef50Trainer:
 
                 entropy = self.graph.score_entropy(score, sigma_expanded, x_noisy, batch)
 
-                # Mean entropy as loss
-                loss = entropy.mean()
+                # Weight by dsigma like training loss for proper comparison
+                weighted_loss = (dsigma[:, None] * entropy).mean()
 
-                results[f'fixed_noise_{noise_level}'] = loss.item()
+                # Debug print
+                print(f"Timestep {timestep}: sigma = {sigma.mean():.3f}, dsigma = {dsigma.mean():.3f}, entropy = {entropy.mean():.4f}, weighted_loss = {weighted_loss:.4f}")
+
+                results[f'fixed_timestep_{timestep}'] = weighted_loss.item()
 
             return results
 
