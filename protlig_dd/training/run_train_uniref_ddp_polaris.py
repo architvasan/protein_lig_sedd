@@ -1,6 +1,8 @@
 """
 Optimized training script for UniRef50 with improved stability and efficiency.
 """
+from mpi4py import MPI
+import os, socket
 import torch
 ### Import intel_extension_for_pytorch for running on aurora
 try:
@@ -46,7 +48,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 ### Import torch.distributed for running on aurora
 import torch.distributed as dist
-
+import argparse
 def setup_ddp(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
@@ -55,11 +57,31 @@ def setup_ddp(rank, world_size):
     torch.xpu.set_device(rank)
 
 def setup_ddp_polaris(rank, world_size):
-    torch.cuda.set_device(int(os.environ['LOCAL_RANK']))
-    dist.init_process_group("nccl")#, rank=rank, world_size=world_size)
+    # DDP: Set environmental variables used by PyTorch
+    SIZE = MPI.COMM_WORLD.Get_size()
+    RANK = MPI.COMM_WORLD.Get_rank()
+    LOCAL_RANK = os.environ.get('PMI_LOCAL_RANK')
+    local_rank = LOCAL_RANK
+    print(f"{RANK=}")
+    print(f"{LOCAL_RANK=}")
+    os.environ['RANK'] = str(RANK)
+    os.environ['WORLD_SIZE'] = str(SIZE)
+    MASTER_ADDR = socket.gethostname() if RANK == 0 else None
+    MASTER_ADDR = MPI.COMM_WORLD.bcast(MASTER_ADDR, root=0)
+    os.environ['MASTER_ADDR'] = MASTER_ADDR 
+    os.environ['MASTER_PORT'] = str(2345)
+    print(f"DDP: Hi from rank {RANK} of {SIZE} with local rank {LOCAL_RANK}. {MASTER_ADDR}")
+
+    # DDP: initialize distributed communication with nccl backend
+    torch.distributed.init_process_group(backend='nccl', init_method='env://', rank=int(RANK), world_size=int(SIZE))
+
+    print(f"Rank: {dist.get_rank()}, World size: {dist.get_world_size()}, Local rank: {local_rank}")
+    print(dist)
     rank = dist.get_rank()
     device_id = rank % torch.cuda.device_count()
-    return rank, device_id
+    torch.cuda.set_device(device_id)
+    print("DDPPP")
+    return dist.get_rank(), device_id, dist.get_world_size()
 
 class ProteinTokenizer:
     """Protein tokenizer based on the download script."""
@@ -389,8 +411,8 @@ class OptimizedUniRef50Trainer:
         np.random.seed(self.seed)
 
         if self.use_ddp:
-            self.rank, device_id = setup_ddp_polaris(self.rank, self.world_size)
-            self.device = torch.device(f"cuda:{device_id}")
+            self.rank, self.device, self.world_size = setup_ddp_polaris(self.rank, self.world_size)
+            #self.device = torch.device(f"cuda:{device_id}")
         else:
             self.device = torch.device(self.dev_id)
         print(f"{self.rank=}")
@@ -612,11 +634,12 @@ class OptimizedUniRef50Trainer:
 
         self.train_sampler = DistributedSampler(
                             train_dataset,
-                            num_replicas=self.world_size,
+                            num_replicas=dist.get_world_size(),
                             rank=self.rank,
                             shuffle=True,
                             drop_last=False)
 
+        print(f"{self.train_sampler=}")
         self.train_loader = DataLoader(
                                 train_dataset,
                                 batch_size=batch_size,
@@ -727,7 +750,7 @@ class OptimizedUniRef50Trainer:
     def wrap_model_ddp(self):
         if self.use_ddp:
             # Get the local device ID (not the global rank)
-            local_device_id = int(str(self.device).split(':')[1])
+            local_device_id = self.device #int(str(self.device).split(':')[1])
             self.model_ddp = DDP(
                                 self.model,
                                 device_ids=[local_device_id],
@@ -788,22 +811,22 @@ class OptimizedUniRef50Trainer:
             notes=f"Optimized UniRef50 training with improved V100-compatible attention and enhanced curriculum learning"
         )
 
-        # Display the Wandb web interface link prominently
-        print("\n" + "="*80)
-        print("🌐 WANDB EXPERIMENT TRACKING")
-        print("="*80)
-        print(f"📊 Project: {project_name}")
-        print(f"🏷️  Run Name: {run_name}")
-        print(f"🔗 Web Interface: {wandb.run.url}")
-        print(f"📈 Dashboard: https://wandb.ai/{wandb.run.entity}/{wandb.run.project}")
-        print("="*80)
-        print("💡 Open the link above to monitor your training in real-time!")
-        print("="*80 + "\n")
+            # Display the Wandb web interface link prominently
+            print("\n" + "="*80)
+            print("🌐 WANDB EXPERIMENT TRACKING")
+            print("="*80)
+            print(f"📊 Project: {project_name}")
+            print(f"🏷️  Run Name: {run_name}")
+            print(f"🔗 Web Interface: {wandb.run.url}")
+            print(f"📈 Dashboard: https://wandb.ai/{wandb.run.entity}/{wandb.run.project}")
+            print("="*80)
+            print("💡 Open the link above to monitor your training in real-time!")
+            print("="*80 + "\n")
 
-        # Store the run for later reference
-        self.wandb_run = run
+            # Store the run for later reference
+            self.wandb_run = run
 
-        print("✅ Wandb setup complete - tracking enabled!")
+            print("✅ Wandb setup complete - tracking enabled!")
 
     def setup_wandb_model_watching(self):
         """Setup model watching after model is created."""
@@ -2317,32 +2340,7 @@ class OptimizedUniRef50Trainer:
 
 
 def main():
-    """Main entry point."""
-    import argparse
-    import os, socket
-
-    if False:
-        from mpi4py import MPI
-        # Print startup banner
-        #comm = MPI.COMM_WORLD
-        #size = comm.Get_size()
-        #rank = comm.Get_rank()
-        #local_rank = os.environ.get('PALS_LOCAL_RANK', 0)
-        #os.environ['RANK'] = str(rank)
-        #os.environ['WORLD_SIZE'] = str(size)
-        #MASTER_ADDR = socket.gethostname() if rank == 0 else None
-        #MASTER_ADDR = comm.bcast(MASTER_ADDR, root=0)
-        #os.environ['MASTER_ADDR'] = f"{MASTER_ADDR}.hsn.cm.aurora.alcf.anl.gov"
-        #os.environ['MASTER_PORT'] = '2345'
-        #print(f"DDP: Hi from rank {rank} of {size} with local rank {local_rank}. {MASTER_ADDR}")
-
-    if True:
-        print("MPI not available, falling back to single node")
-        rank = int(os.environ['LOCAL_RANK'])#0
-        torch.cuda.set_device(rank)
-        size = 4
-        #local_rank = 0
-
+    
     print("\n" + "="*80)
     print("🧬 OPTIMIZED UNIREF50 SEDD TRAINING")
     print("="*80)
@@ -2394,8 +2392,8 @@ def main():
             work_dir=args.work_dir,
             config_file=args.config,
             datafile=args.datafile,
-            rank=rank,
-            world_size=size,
+            rank=0,
+            world_size=0,
             dev_id=args.device,
             seed=args.seed,
             force_fresh_start=args.fresh,
