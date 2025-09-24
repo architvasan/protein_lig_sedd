@@ -695,14 +695,34 @@ class OptimizedUniRef50Trainer:
     
 
     def setup_optimizer(self):
-        """Setup optimizer with improved scheduling."""
+        """Setup optimizer with DDP-aware learning rate scaling."""
         print("Setting up optimizer...")
 
-        # Get optimizer
+        # Calculate DDP-scaled learning rate (most stable approach)
+        base_lr = self.cfg.optim.lr
+        if self.use_ddp and self.world_size > 1:
+            # Linear scaling with world size (most stable for DDP)
+            scaled_lr = base_lr * self.world_size
+            print(f"🔄 DDP Learning Rate Scaling:")
+            print(f"   Base LR: {base_lr:.2e}")
+            print(f"   World Size: {self.world_size}")
+            print(f"   Scaled LR: {scaled_lr:.2e} (linear scaling)")
+        else:
+            scaled_lr = base_lr
+            print(f"📊 Single GPU Learning Rate: {scaled_lr:.2e}")
+
+        # Temporarily modify config for optimizer creation
+        original_lr = self.cfg.optim.lr
+        self.cfg.optim.lr = scaled_lr
+
+        # Get optimizer with scaled learning rate
         self.optimizer = losses.get_optimizer(
             self.cfg,
             chain(self.model.parameters(), self.noise.parameters())
         )
+
+        # Restore original config
+        self.cfg.optim.lr = original_lr
 
         # Apply IPEX optimization for Intel XPU
         device_type = str(self.device).split(':')[0]
@@ -723,15 +743,17 @@ class OptimizedUniRef50Trainer:
             self.use_amp = False
             print(f"✅ Using {device_type.upper()} without mixed precision")
         
-        # Setup learning rate scheduler
+        # Setup learning rate scheduler with scaled learning rate
         self.scheduler = WarmupCosineLR(
             self.optimizer,
             warmup_steps=self.cfg.optim.warmup,
             max_steps=self.cfg.training.n_iters,
-            base_lr=self.cfg.optim.lr * 0.1,
-            max_lr=self.cfg.optim.lr,
-            min_lr=self.cfg.optim.lr * 0.01
+            base_lr=scaled_lr * 0.1,
+            max_lr=scaled_lr,
+            min_lr=scaled_lr * 0.01
         )
+
+        print(f"✅ Scheduler configured with scaled LR: max={scaled_lr:.2e}, warmup_steps={self.cfg.optim.warmup}")
         
         # Training state
         self.state = {
@@ -755,7 +777,7 @@ class OptimizedUniRef50Trainer:
                                 self.model,
                                 device_ids=[local_device_id],
                                 output_device=local_device_id,
-                                find_unused_parameters=True)
+                                find_unused_parameters=False)
             print(f"✅ Model wrapped with DDP on device {local_device_id}")
         else:
             self.model_ddp = self.model
@@ -782,7 +804,9 @@ class OptimizedUniRef50Trainer:
                     # Training configuration
                     'batch_size': safe_getattr(self.cfg, 'training.batch_size', 16),
                     'accumulation_steps': safe_getattr(self.cfg, 'training.accum', 2),
-                    'learning_rate': safe_getattr(self.cfg, 'optim.lr', 5e-5),
+                    'base_learning_rate': safe_getattr(self.cfg, 'optim.lr', 5e-5),
+                    'effective_learning_rate': safe_getattr(self.cfg, 'optim.lr', 5e-5) * (self.world_size if self.use_ddp else 1),
+                    'world_size': self.world_size if self.use_ddp else 1,
                     'weight_decay': safe_getattr(self.cfg, 'optim.weight_decay', 0.01),
                     'warmup_steps': safe_getattr(self.cfg, 'optim.warmup', 1000),
                     'max_iterations': safe_getattr(self.cfg, 'training.n_iters', 5000),
@@ -2105,7 +2129,15 @@ class OptimizedUniRef50Trainer:
             torch.save(checkpoint, best_path)
         
         print(f"Checkpoint saved: {checkpoint_path}")
-    
+
+    def cleanup_ddp(self):
+        """Clean up DDP process group."""
+        if self.use_ddp and torch.distributed.is_initialized():
+            print("🔄 Cleaning up DDP process group...")
+            torch.distributed.barrier()  # Final sync before cleanup
+            torch.distributed.destroy_process_group()
+            print("✅ DDP process group destroyed")
+
     def train(self, wandb_project: str, wandb_name: str):
         """Main training loop with comprehensive Wandb logging."""
         print("Starting training...")
@@ -2205,6 +2237,12 @@ class OptimizedUniRef50Trainer:
         print(f"🔄 Training for {total_epochs} epochs (override: {self.epochs_override}, config: {self.cfg.training.epochs})")
 
         for epoch in range(start_epoch, total_epochs):
+            # Set epoch for distributed sampler to ensure proper shuffling
+            if self.use_ddp and hasattr(self.train_sampler, 'set_epoch'):
+                self.train_sampler.set_epoch(epoch)
+                if self.rank == 0:
+                    print(f"🔄 Set sampler epoch to {epoch} for proper data shuffling")
+
             epoch_loss = 0.0
             num_batches = 0
 
@@ -2250,8 +2288,8 @@ class OptimizedUniRef50Trainer:
                     running_loss = 0.0
                     log_interval_start_time = time.time()
 
-                # Log reconstruction and fixed noise losses every 100 steps
-                if step % self.cfg.training.log_freq * 5 == 0 and step > 0:
+                # Log reconstruction and fixed noise losses every 100 steps (RANK 0 ONLY)
+                if step % self.cfg.training.log_freq * 5 == 0 and step > 0 and self.rank == 0:
                     print(f"🔍 Computing reconstruction and fixed noise losses at step {step}...")
                     try:
                         # Get a single batch for loss computation
@@ -2268,32 +2306,35 @@ class OptimizedUniRef50Trainer:
                         # Compute fixed noise level losses
                         fixed_noise_metrics = self.eval_fixed_noise_levels(small_batch)
 
-                        # Log to wandb (only on rank 0)
-                        if self.rank == 0:
-                            metrics_to_log = {
-                                'train/step': step,
-                                'train/epoch': epoch,
-                            }
+                        # Log to wandb
+                        metrics_to_log = {
+                            'train/step': step,
+                            'train/epoch': epoch,
+                        }
 
-                            if recon_loss is not None:
-                                metrics_to_log['train/reconstruction_loss'] = recon_loss
-                                print(f"   📊 Reconstruction Loss: {recon_loss:.4f}")
+                        if recon_loss is not None:
+                            metrics_to_log['train/reconstruction_loss'] = recon_loss
+                            print(f"   📊 Reconstruction Loss: {recon_loss:.4f}")
+                        else:
+                            print("   ⚠️  Reconstruction loss is None")
 
+                        for noise_key, noise_value in fixed_noise_metrics.items():
+                            if noise_value is not None:
+                                metrics_to_log[f'train/{noise_key}'] = noise_value
+                                print(f"   📊 {noise_key}: {noise_value:.4f}")
                             else:
-                                print("   ⚠️  Reconstruction loss is None")
-
-                            for noise_key, noise_value in fixed_noise_metrics.items():
-                                if noise_value is not None:
-                                    metrics_to_log[f'train/{noise_key}'] = noise_value
-                                    print(f"   📊 {noise_key}: {noise_value:.4f}")
-
-                                else:
-                                    print(f"   ⚠️  {noise_key}: None (skipped)")    
+                                print(f"   ⚠️  {noise_key}: None (skipped)")
                             wandb.log(metrics_to_log, step=step)
 
                     except Exception as e:
                         print(f"⚠️  Warning: Could not compute reconstruction/fixed noise losses: {e}")
                         # Continue training even if logging fails
+
+                # Synchronization barrier: Wait for rank 0 to finish evaluation before continuing
+                if step % self.cfg.training.log_freq * 5 == 0 and step > 0 and self.use_ddp:
+                    torch.distributed.barrier()
+                    if self.rank == 0:
+                        print("   🔄 All ranks synchronized after evaluation")
 
                 # Quick generation test (more frequent than comprehensive evaluation)
                 quick_gen_freq = getattr(self.cfg.training, 'quick_gen_freq', self.cfg.training.log_freq * 10)
@@ -2305,6 +2346,9 @@ class OptimizedUniRef50Trainer:
                     val_loss, generation_properties = self.comprehensive_evaluation(
                         step, epoch, num_samples=10, sampling_method=self.sampling_method
                     )
+                    # Synchronization barrier after comprehensive evaluation
+                    if self.use_ddp:
+                        torch.distributed.barrier()
 
                     # Update best loss tracking
                     if val_loss < best_loss:
@@ -2406,6 +2450,9 @@ class OptimizedUniRef50Trainer:
         print(f"📈 Final validation loss: {final_val_loss:.4f}")
         print(f"🏆 Best training loss: {best_loss:.4f}")
 
+        # Clean up DDP process group
+        self.cleanup_ddp()
+
         wandb.finish()
         print("✅ Wandb logging completed")
 
@@ -2487,6 +2534,14 @@ def main():
         import traceback
         traceback.print_exc()
         print("\n💡 Check the error above and verify your configuration.")
+
+        # Cleanup DDP even if training failed
+        try:
+            if 'trainer' in locals() and hasattr(trainer, 'cleanup_ddp'):
+                trainer.cleanup_ddp()
+        except Exception as cleanup_error:
+            print(f"⚠️  DDP cleanup failed: {cleanup_error}")
+
         return 1
 
     print("\n🎉 Training completed successfully!")
