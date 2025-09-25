@@ -1983,9 +1983,22 @@ class OptimizedUniRef50Trainer:
     def train_step(self, batch):
         """Single training step with optimizations."""
         import time
+        import traceback
         step_start_time = time.time()
 
-        print(f"[Rank {self.rank}] train_step: Starting, batch shape: {batch.shape}")
+        # Track train_step calls to catch multiple calls
+        if not hasattr(self, '_train_step_call_count'):
+            self._train_step_call_count = {}
+        step_key = self.state['step']
+        self._train_step_call_count[step_key] = self._train_step_call_count.get(step_key, 0) + 1
+
+        print(f"[Rank {self.rank}] train_step: Starting call #{self._train_step_call_count[step_key]} for step {step_key}, batch shape: {batch.shape}")
+
+        if self._train_step_call_count[step_key] > 1:
+            print(f"🚨 [Rank {self.rank}] WARNING: Multiple train_step calls for step {step_key}!")
+            print(f"🚨 [Rank {self.rank}] Call stack:")
+            traceback.print_stack()
+
         self.model.train()
         print(f"[Rank {self.rank}] train_step: Set model to train mode")
 
@@ -2013,7 +2026,19 @@ class OptimizedUniRef50Trainer:
 
         # Backward pass with device-aware gradient scaling
         # Note: For DDP, we disabled gradient accumulation to avoid sync issues
-        print(f"[Rank {self.rank}] train_step: Starting backward pass")
+        print(f"[Rank {self.rank}] train_step: Starting backward pass (step {self.state['step']})")
+
+        # Add backward call tracking to catch multiple calls
+        if not hasattr(self, '_backward_call_count'):
+            self._backward_call_count = {}
+        step_key = self.state['step']
+        self._backward_call_count[step_key] = self._backward_call_count.get(step_key, 0) + 1
+
+        if self._backward_call_count[step_key] > 1:
+            print(f"🚨 [Rank {self.rank}] WARNING: Multiple backward calls at step {step_key}! Call #{self._backward_call_count[step_key]}")
+            print(f"🚨 [Rank {self.rank}] This will cause DDP deadlock! Skipping additional backward call.")
+            return loss.item(), time.time() - step_start_time, {}
+
         if self.scaler is not None:
             self.scaler.scale(loss).backward()
             print(f"[Rank {self.rank}] train_step: Scaled backward pass completed")
