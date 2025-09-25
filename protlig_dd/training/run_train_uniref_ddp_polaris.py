@@ -804,25 +804,23 @@ class OptimizedUniRef50Trainer:
             print(f"📝 File logging enabled: {self.log_file}")
 
     def log_metrics(self, metrics, step=None):
-        """Log metrics to wandb or file - ALL RANKS participate but only rank 0 logs."""
-        # ALL ranks participate in metric computation, but only rank 0 logs
+        """Log metrics to wandb or file - ALL RANKS log everything."""
+        # ALL ranks log everything to prevent sync issues
         if self.use_wandb:
-            if self.rank == 0:
-                wandb.log(metrics, step=step)
+            wandb.log(metrics, step=step)
         else:
-            if self.rank == 0:
-                timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                with open(self.log_file, 'a') as f:
-                    # Write metrics in a structured format
-                    metric_str = f"{timestamp}"
-                    if step is not None:
-                        metric_str += f",step={step}"
-                    for key, value in metrics.items():
-                        if isinstance(value, (int, float)):
-                            metric_str += f",{key}={value:.6f}"
-                        else:
-                            metric_str += f",{key}={value}"
-                    f.write(metric_str + "\n")
+            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            with open(self.log_file, 'a') as f:
+                # Write metrics in a structured format
+                metric_str = f"{timestamp}"
+                if step is not None:
+                    metric_str += f",step={step}"
+                for key, value in metrics.items():
+                    if isinstance(value, (int, float)):
+                        metric_str += f",{key}={value:.6f}"
+                    else:
+                        metric_str += f",{key}={value}"
+                f.write(metric_str + "\n")
 
     def wrap_model_ddp(self):
         if self.use_ddp:
@@ -913,8 +911,11 @@ class OptimizedUniRef50Trainer:
 
     def setup_wandb_model_watching(self):
         """Setup model watching after model is created."""
+        if not self.use_wandb:
+            return
+
         try:
-            if self.rank == 0:
+            if self.rank == 0:  # Keep this rank check for wandb.watch
                 # Watch model for gradient and parameter tracking
                 log_freq = safe_getattr(self.cfg, 'training.log_freq', 50)
                 wandb.watch(self.model, log='all', log_freq=log_freq)
@@ -946,14 +947,13 @@ class OptimizedUniRef50Trainer:
         self.log_metrics(metrics, step=step)
 
     def log_to_wandb(self, metrics: dict, step: int = None):
-        """Helper method to log to wandb or file only on rank 0."""
-        if self.rank == 0:
-            self.log_metrics(metrics, step=step)
+        """Helper method to log to wandb or file - ALL RANKS log."""
+        # All ranks log to prevent sync issues
+        self.log_metrics(metrics, step=step)
 
     def log_validation_metrics(self, step: int, val_loss: float, perplexity: float = None, recon_loss: float = None):
-        """Log validation metrics to Wandb (rank 0 only)."""
-        if self.rank != 0:
-            return
+        """Log validation metrics - ALL RANKS log."""
+        # All ranks log to prevent sync issues
 
         metrics = {
             'val/loss': val_loss,
@@ -1231,9 +1231,8 @@ class OptimizedUniRef50Trainer:
             raise ValueError(f"Unknown sampling method: {sampling_method}. Use 'rigorous' or 'simple'.")
 
     def quick_generation_test(self, step: int, epoch: int, num_samples: int = 3, max_length: int = 128):
-        """Quick generation test during training to monitor generation quality (rank 0 only)."""
-        if self.rank != 0:
-            return True  # Return success for non-rank-0 processes
+        """Quick generation test during training to monitor generation quality - ALL RANKS participate."""
+        # All ranks participate to prevent sync issues
 
         # Use same max length as training data if not specified
         if max_length is None:
@@ -1510,11 +1509,8 @@ class OptimizedUniRef50Trainer:
         return properties
 
     def comprehensive_evaluation(self, step: int, epoch: int, num_samples: int = 15, sampling_method: str = "rigorous"):
-        """Comprehensive evaluation including generation quality assessment (rank 0 only)."""
-        if self.rank != 0:
-            # For non-rank-0 processes, just run validation and return basic metrics
-            val_loss, _, _ = self.validate_model()
-            return val_loss, {'summary': {'avg_length': 0}}
+        """Comprehensive evaluation including generation quality assessment - ALL RANKS participate."""
+        # All ranks participate to prevent sync issues
 
         print(f"\n🔬 COMPREHENSIVE EVALUATION - Step {step}, Epoch {epoch}")
         print("=" * 80)
@@ -1884,7 +1880,7 @@ class OptimizedUniRef50Trainer:
                 curriculum_type=getattr(self.cfg.curriculum, 'difficulty_ramp', 'exponential'),
                 bias_strength=getattr(self.cfg.curriculum, 'bias_strength', 2.0)
             )
-            if self.rank == 0 and self.state['step'] % 100 == 0:
+            if self.state['step'] % 100 == 0:
                 from protlig_dd.processing.noise_lib import get_curriculum_stats
                 stats = get_curriculum_stats(t, self.state['step'],
                                            getattr(self.cfg.curriculum, 'preschool_time', 5000))
@@ -2351,8 +2347,7 @@ class OptimizedUniRef50Trainer:
             # Set epoch for distributed sampler to ensure proper shuffling
             if self.use_ddp and hasattr(self.train_sampler, 'set_epoch'):
                 self.train_sampler.set_epoch(epoch)
-                if self.rank == 0:
-                    print(f"🔄 Set sampler epoch to {epoch} for proper data shuffling")
+                print(f"🔄 Set sampler epoch to {epoch} for proper data shuffling")
 
             epoch_loss = 0.0
             num_batches = 0
