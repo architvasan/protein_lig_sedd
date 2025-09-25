@@ -65,7 +65,7 @@ optim:
   beta2: 0.95
   eps: 1.0e-08
   grad_clip: 1.0
-  lr: 0.00008
+  lr: 0.00004
   optimizer: AdamW
   warmup: 2500
   weight_decay: 0.01
