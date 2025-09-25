@@ -1813,12 +1813,38 @@ class OptimizedUniRef50Trainer:
             else:
                 raise ValueError(f"Batch must be at least 2D, got {batch.dim()}D with shape {batch.shape}")
 
-        # Sample timesteps
-        t = torch.rand(batch.shape[0], device=self.device) * (1 - 1e-3) + 1e-3
+        # Sample timesteps with optional probabilistic curriculum
+        if (hasattr(self.cfg, 'curriculum') and self.cfg.curriculum.enabled and
+            hasattr(self.cfg.curriculum, 'probabilistic') and self.cfg.curriculum.probabilistic):
+            # Use probabilistic curriculum: bias timestep sampling toward lower noise early in training
+            from protlig_dd.processing.noise_lib import sample_timesteps_curriculum
+            t = sample_timesteps_curriculum(
+                batch_size=batch.shape[0],
+                device=self.device,
+                training_step=self.state['step'],
+                preschool_time=getattr(self.cfg.curriculum, 'preschool_time', 5000),
+                curriculum_type=getattr(self.cfg.curriculum, 'difficulty_ramp', 'exponential'),
+                bias_strength=getattr(self.cfg.curriculum, 'bias_strength', 2.0)
+            )
+            if self.rank == 0 and self.state['step'] % 100 == 0:
+                from protlig_dd.processing.noise_lib import get_curriculum_stats
+                stats = get_curriculum_stats(t, self.state['step'],
+                                           getattr(self.cfg.curriculum, 'preschool_time', 5000))
+                print(f"📊 Probabilistic curriculum: step={self.state['step']}, "
+                      f"progress={stats['curriculum_progress']:.2f}, "
+                      f"avg_t={stats['mean_timestep']:.3f}, "
+                      f"low_noise%={stats['low_noise_fraction']*100:.1f}, "
+                      f"high_noise%={stats['high_noise_fraction']*100:.1f}")
+        else:
+            # Standard uniform timestep sampling
+            t = torch.rand(batch.shape[0], device=self.device) * (1 - 1e-3) + 1e-3
+
         sigma, dsigma = self.noise(t)
         
-        # Apply curriculum learning
-        if hasattr(self.cfg, 'curriculum') and self.cfg.curriculum.enabled:
+        # Apply curriculum learning (sigma scaling approach)
+        if (hasattr(self.cfg, 'curriculum') and self.cfg.curriculum.enabled and
+            not getattr(self.cfg.curriculum, 'probabilistic', False)):
+            # Use sigma scaling curriculum (original approach)
             perturbed_batch = self.graph.sample_transition_curriculum(
                 batch,
                 sigma,  # Fixed: removed [:, None] as graph functions handle broadcasting internally
@@ -1827,6 +1853,7 @@ class OptimizedUniRef50Trainer:
                 curriculum_type=getattr(self.cfg.curriculum, 'difficulty_ramp', 'exponential')
             )
         else:
+            # Use standard transition (either no curriculum or probabilistic curriculum already applied)
             perturbed_batch = self.graph.sample_transition(batch, sigma)  # Fixed: removed [:, None]
 
         # Validate perturbed_batch is 2D: [batch_size, sequence_length]
