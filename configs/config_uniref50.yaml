@@ -85,7 +85,7 @@ training:
   epochs: 5
   eval_freq: 2000
   force_reprocess: false
-  log_freq: 100
+  log_freq: 20
   max_samples: 50000000
   n_iters: 25000
   num_workers: 4

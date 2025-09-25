@@ -7,7 +7,7 @@ echo "🚀 Starting SUPER MINIMAL 32-rank DDP debugging..."
 echo "📊 This will run only 10 training steps with maximum debugging output"
 
 # Override config to run minimal steps
-cat > /tmp/minimal_debug_config.yaml << EOF
+mpiexec -n 8 -ppn 8 cat > ./minimal_debug_config.yaml << EOF
 model:
   d_model: 256
   n_layers: 4

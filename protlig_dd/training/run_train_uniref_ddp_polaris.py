@@ -2000,7 +2000,7 @@ class OptimizedUniRef50Trainer:
         if self.use_ddp:
             # For DDP, disable gradient accumulation to avoid sync issues
             loss = self.compute_loss(batch)
-            effective_accum = 1
+            effective_accum = self.cfg.training.accum
         else:
             loss = self.compute_loss(batch) / self.cfg.training.accum
             effective_accum = self.cfg.training.accum
@@ -2018,7 +2018,7 @@ class OptimizedUniRef50Trainer:
         # Update every accum steps (simplified for DDP)
         if self.use_ddp:
             # For DDP: update every step to avoid sync issues
-            should_update = True
+            should_update = (self.state['step'] + 1) % self.cfg.training.accum == 0
         else:
             should_update = (self.state['step'] + 1) % self.cfg.training.accum == 0
 
@@ -2374,7 +2374,7 @@ class OptimizedUniRef50Trainer:
                 })
 
                 # Detailed logging
-                if step % self.cfg.training.log_freq == 0:
+                if step % self.cfg.training.log_freq*5 == 0:
                     avg_loss = running_loss / self.cfg.training.log_freq
                     interval_time = time.time() - log_interval_start_time
 
@@ -2396,7 +2396,7 @@ class OptimizedUniRef50Trainer:
                     log_interval_start_time = time.time()
 
                 # Log reconstruction and fixed noise losses every 100 steps (RANK 0 ONLY)
-                if step % self.cfg.training.log_freq * 5 == 0 and step > 0 and self.rank == 0:
+                if step % self.cfg.training.log_freq * 5 == 0 and step > 0:
                     print(f"🔍 Computing reconstruction and fixed noise losses at step {step}...")
                     try:
                         # Get a single batch for loss computation
@@ -2431,7 +2431,7 @@ class OptimizedUniRef50Trainer:
                                 print(f"   📊 {noise_key}: {noise_value:.4f}")
                             else:
                                 print(f"   ⚠️  {noise_key}: None (skipped)")
-                            wandb.log(metrics_to_log, step=step)
+                            #wandb.log(metrics_to_log, step=step)
 
                     except Exception as e:
                         print(f"⚠️  Warning: Could not compute reconstruction/fixed noise losses: {e}")
@@ -2458,7 +2458,7 @@ class OptimizedUniRef50Trainer:
                     print(f"✅ Evaluation completed. Val loss: {val_loss:.4f}")
 
                 # Checkpointing
-                if step % self.cfg.training.snapshot_freq == 0:
+                if step % self.cfg.training.snapshot_freq*5 == 0:
                     avg_epoch_loss = epoch_loss / num_batches
                     is_best = avg_epoch_loss < best_loss
 
@@ -2469,12 +2469,13 @@ class OptimizedUniRef50Trainer:
                     self.save_checkpoint(step, epoch, best_loss, is_best)
 
                     # Log checkpoint info
-                    self.log_to_wandb({
-                        'checkpoint/step': step,
-                        'checkpoint/best_loss': best_loss,
-                        'checkpoint/current_loss': avg_epoch_loss,
-                        'checkpoint/is_best': is_best
-                    }, step=step)
+                    if False:
+                        self.log_to_wandb({
+                            'checkpoint/step': step,
+                            'checkpoint/best_loss': best_loss,
+                            'checkpoint/current_loss': avg_epoch_loss,
+                            'checkpoint/is_best': is_best
+                        }, step=step)
 
                 # Early stopping check
                 if step >= self.cfg.training.n_iters:
