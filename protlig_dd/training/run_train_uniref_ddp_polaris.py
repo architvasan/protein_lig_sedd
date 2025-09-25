@@ -1946,22 +1946,12 @@ class OptimizedUniRef50Trainer:
             loss = self.compute_loss(batch) / self.cfg.training.accum
             effective_accum = self.cfg.training.accum
 
-        # Backward pass with device-aware gradient scaling and DDP sync control
-        is_accumulation_step = (self.state['step'] + 1) % self.cfg.training.accum != 0
-
-        if self.use_ddp and is_accumulation_step:
-            # Don't sync gradients during accumulation steps
-            with self.model.no_sync():
-                if self.scaler is not None:
-                    self.scaler.scale(loss).backward()
-                else:
-                    loss.backward()
+        # Backward pass with device-aware gradient scaling
+        # Note: For DDP, we disabled gradient accumulation to avoid sync issues
+        if self.scaler is not None:
+            self.scaler.scale(loss).backward()
         else:
-            # Sync gradients on the final accumulation step
-            if self.scaler is not None:
-                self.scaler.scale(loss).backward()
-            else:
-                loss.backward()
+            loss.backward()
 
         # Additional metrics for logging
         additional_metrics = {}
