@@ -49,6 +49,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 ### Import torch.distributed for running on aurora
 import torch.distributed as dist
 import argparse
+import datetime
+
 def setup_ddp(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
@@ -401,6 +403,7 @@ class OptimizedUniRef50Trainer:
     sampling_method: str = "rigorous"  # "rigorous" or "simple"
     epochs_override: Optional[int] = None  # Override epochs for hyperparameter sweeps
     use_ddp: bool = True
+    use_wandb: bool = True  # Toggle wandb logging on/off
 
     def __post_init__(self):
         """Initialize trainer components."""
@@ -435,6 +438,9 @@ class OptimizedUniRef50Trainer:
         os.makedirs(self.sample_dir, exist_ok=True)
 
         print(f"Config loaded from: {self.config_file}")
+
+        # Setup logging
+        self.setup_logging()
 
         # Initialize device-specific attributes
         device_type = str(self.device).split(':')[0]
@@ -769,6 +775,54 @@ class OptimizedUniRef50Trainer:
         
         print("Optimizer ready.")
 
+    def setup_logging(self):
+        """Setup logging system - either wandb or file logging."""
+        if self.use_wandb:
+            print("📊 Wandb logging enabled")
+        else:
+            # Setup file logging
+            log_dir = os.path.join(self.work_dir, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+
+            # Create log file with timestamp and rank
+            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            if self.use_ddp:
+                log_filename = f"training_rank{self.rank}_{timestamp}.log"
+            else:
+                log_filename = f"training_{timestamp}.log"
+
+            self.log_file = os.path.join(log_dir, log_filename)
+
+            # Write header
+            with open(self.log_file, 'w') as f:
+                f.write(f"# Training Log - Started {timestamp}\n")
+                f.write(f"# Rank: {self.rank if self.use_ddp else 0}\n")
+                f.write(f"# Device: {self.device}\n")
+                f.write(f"# World Size: {self.world_size if self.use_ddp else 1}\n")
+                f.write("# Format: step,epoch,loss,lr,time\n")
+
+            print(f"📝 File logging enabled: {self.log_file}")
+
+    def log_metrics(self, metrics, step=None):
+        """Log metrics to wandb or file."""
+        if self.use_wandb and self.rank == 0:
+            # Only rank 0 logs to wandb
+            wandb.log(metrics, step=step)
+        elif not self.use_wandb and self.rank == 0:
+            # Only rank 0 logs to file
+            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            with open(self.log_file, 'a') as f:
+                # Write metrics in a structured format
+                metric_str = f"{timestamp}"
+                if step is not None:
+                    metric_str += f",step={step}"
+                for key, value in metrics.items():
+                    if isinstance(value, (int, float)):
+                        metric_str += f",{key}={value:.6f}"
+                    else:
+                        metric_str += f",{key}={value}"
+                f.write(metric_str + "\n")
+
     def wrap_model_ddp(self):
         if self.use_ddp:
             # Get the local device ID (not the global rank)
@@ -785,6 +839,10 @@ class OptimizedUniRef50Trainer:
 
     def setup_wandb(self, project_name: str, run_name: str):
         """Setup Wandb with comprehensive logging configuration."""
+        if not self.use_wandb:
+            print("📝 Wandb disabled - using file logging instead")
+            return
+
         print("🚀 Setting up Wandb logging...")
 
         # Initialize wandb only on rank 0
@@ -885,12 +943,12 @@ class OptimizedUniRef50Trainer:
             for key, value in additional_metrics.items():
                 metrics[f'train/{key}'] = value
 
-        wandb.log(metrics, step=step)
+        self.log_metrics(metrics, step=step)
 
     def log_to_wandb(self, metrics: dict, step: int = None):
-        """Helper method to log to wandb only on rank 0."""
+        """Helper method to log to wandb or file only on rank 0."""
         if self.rank == 0:
-            wandb.log(metrics, step=step)
+            self.log_metrics(metrics, step=step)
 
     def log_validation_metrics(self, step: int, val_loss: float, perplexity: float = None, recon_loss: float = None):
         """Log validation metrics to Wandb (rank 0 only)."""
@@ -2500,8 +2558,12 @@ class OptimizedUniRef50Trainer:
         # Clean up DDP process group
         self.cleanup_ddp()
 
-        wandb.finish()
-        print("✅ Wandb logging completed")
+        # Cleanup logging
+        if self.use_wandb:
+            wandb.finish()
+            print("✅ Wandb logging completed")
+        else:
+            print("✅ File logging completed")
 
 
 def main():
@@ -2531,6 +2593,8 @@ def main():
                        help="Tokenize untokenized data on the fly (use with raw sequence data)")
     parser.add_argument("--use_streaming", action="store_true",
                        help="Use streaming mode for very large files (>50GB)")
+    parser.add_argument("--no_wandb", action="store_true",
+                       help="Disable wandb logging and use file logging instead")
 
     args = parser.parse_args()
 
@@ -2548,6 +2612,7 @@ def main():
     print(f"🧬 Sampling method: {args.sampling_method}")
     print(f"🔤 Tokenize on fly: {args.tokenize_on_fly}")
     print(f"🌊 Use streaming: {args.use_streaming}")
+    print(f"📊 Wandb logging: {'disabled' if args.no_wandb else 'enabled'}")
     print()
 
     try:
@@ -2563,7 +2628,8 @@ def main():
             seed=args.seed,
             force_fresh_start=args.fresh,
             sampling_method=args.sampling_method,
-            epochs_override=args.epochs
+            epochs_override=args.epochs,
+            use_wandb=not args.no_wandb
         )
 
         # Set tokenization and streaming options
