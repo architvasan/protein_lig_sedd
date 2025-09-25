@@ -1937,20 +1937,43 @@ class OptimizedUniRef50Trainer:
             batch = batch.view(batch.shape[0], -1)
             print(f"Reshaped batch to: {batch.shape}")
 
-        # Compute loss
-        loss = self.compute_loss(batch) / self.cfg.training.accum
-
-        # Backward pass with device-aware gradient scaling
-        if self.scaler is not None:
-            self.scaler.scale(loss).backward()
+        # Compute loss with DDP-aware accumulation
+        if self.use_ddp:
+            # For DDP, disable gradient accumulation to avoid sync issues
+            loss = self.compute_loss(batch)
+            effective_accum = 1
         else:
-            loss.backward()
+            loss = self.compute_loss(batch) / self.cfg.training.accum
+            effective_accum = self.cfg.training.accum
+
+        # Backward pass with device-aware gradient scaling and DDP sync control
+        is_accumulation_step = (self.state['step'] + 1) % self.cfg.training.accum != 0
+
+        if self.use_ddp and is_accumulation_step:
+            # Don't sync gradients during accumulation steps
+            with self.model.no_sync():
+                if self.scaler is not None:
+                    self.scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+        else:
+            # Sync gradients on the final accumulation step
+            if self.scaler is not None:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
         # Additional metrics for logging
         additional_metrics = {}
 
-        # Update every accum steps
-        if (self.state['step'] + 1) % self.cfg.training.accum == 0:
+        # Update every accum steps (simplified for DDP)
+        if self.use_ddp:
+            # For DDP: update every step to avoid sync issues
+            should_update = True
+        else:
+            should_update = (self.state['step'] + 1) % self.cfg.training.accum == 0
+
+        if should_update:
             # Unscale gradients for clipping (CUDA only)
             if self.scaler is not None:
                 self.scaler.unscale_(self.optimizer)
@@ -1971,6 +1994,10 @@ class OptimizedUniRef50Trainer:
                     self.cfg.optim.grad_clip
                 )
 
+            # Debug: Log optimizer steps for DDP debugging
+            if self.use_ddp and self.state['step'] % 100 == 0:
+                print(f"[Rank {self.rank}] Optimizer step at global step {self.state['step']}")
+
             # Optimizer step with device-aware scaling
             if self.scaler is not None:
                 self.scaler.step(self.optimizer)
@@ -1987,7 +2014,7 @@ class OptimizedUniRef50Trainer:
 
         step_time = time.time() - step_start_time
 
-        return loss.item() * self.cfg.training.accum, step_time, additional_metrics
+        return loss.item() * effective_accum, step_time, additional_metrics
 
     def eval_reconstruction_loss(self, batch):
         """Evaluate model at very low timestep - approximates reconstruction task."""

@@ -1,0 +1,59 @@
+# Example configurations for different curriculum learning approaches
+
+# 1. PROBABILISTIC CURRICULUM (NEW APPROACH)
+# Biases timestep sampling toward lower noise levels early in training
+# Keeps sigma values unchanged - only modifies sampling probability
+curriculum_probabilistic:
+  enabled: true
+  probabilistic: true              # Enable probabilistic curriculum
+  preschool_time: 3000            # Steps to reach uniform sampling
+  difficulty_ramp: "exponential"  # "linear", "exponential", or "cosine"
+  bias_strength: 2.0              # Higher = stronger bias toward low noise
+
+# 2. SIGMA SCALING CURRICULUM (ORIGINAL APPROACH)  
+# Scales down sigma values early in training
+curriculum_sigma_scaling:
+  enabled: true
+  probabilistic: false            # Disable probabilistic curriculum
+  preschool_time: 5000           # Steps to reach full sigma values
+  difficulty_ramp: "exponential" # "linear", "exponential", or "cosine"
+
+# 3. NO CURRICULUM (BASELINE)
+curriculum_disabled:
+  enabled: false
+
+# 4. HYBRID APPROACH (EXPERIMENTAL)
+# Uses both probabilistic sampling AND sigma scaling
+# Generally not recommended - pick one approach
+curriculum_hybrid:
+  enabled: true
+  probabilistic: true
+  preschool_time: 3000
+  difficulty_ramp: "exponential"
+  bias_strength: 1.5              # Lower bias since sigma scaling also applied
+
+# RECOMMENDED SETTINGS FOR DIFFERENT SCENARIOS:
+
+# Fast prototyping (quick curriculum)
+curriculum_fast:
+  enabled: true
+  probabilistic: true
+  preschool_time: 2000
+  difficulty_ramp: "exponential"
+  bias_strength: 3.0
+
+# Stable training (gentle curriculum)
+curriculum_stable:
+  enabled: true
+  probabilistic: true
+  preschool_time: 4000
+  difficulty_ramp: "cosine"
+  bias_strength: 1.5
+
+# Maximum performance (longer curriculum)
+curriculum_performance:
+  enabled: true
+  probabilistic: true
+  preschool_time: 5000
+  difficulty_ramp: "exponential"
+  bias_strength: 2.0
