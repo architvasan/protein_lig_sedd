@@ -804,24 +804,25 @@ class OptimizedUniRef50Trainer:
             print(f"📝 File logging enabled: {self.log_file}")
 
     def log_metrics(self, metrics, step=None):
-        """Log metrics to wandb or file."""
-        if self.use_wandb and self.rank == 0:
-            # Only rank 0 logs to wandb
-            wandb.log(metrics, step=step)
-        elif not self.use_wandb and self.rank == 0:
-            # Only rank 0 logs to file
-            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            with open(self.log_file, 'a') as f:
-                # Write metrics in a structured format
-                metric_str = f"{timestamp}"
-                if step is not None:
-                    metric_str += f",step={step}"
-                for key, value in metrics.items():
-                    if isinstance(value, (int, float)):
-                        metric_str += f",{key}={value:.6f}"
-                    else:
-                        metric_str += f",{key}={value}"
-                f.write(metric_str + "\n")
+        """Log metrics to wandb or file - ALL RANKS participate but only rank 0 logs."""
+        # ALL ranks participate in metric computation, but only rank 0 logs
+        if self.use_wandb:
+            if self.rank == 0:
+                wandb.log(metrics, step=step)
+        else:
+            if self.rank == 0:
+                timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                with open(self.log_file, 'a') as f:
+                    # Write metrics in a structured format
+                    metric_str = f"{timestamp}"
+                    if step is not None:
+                        metric_str += f",step={step}"
+                    for key, value in metrics.items():
+                        if isinstance(value, (int, float)):
+                            metric_str += f",{key}={value:.6f}"
+                        else:
+                            metric_str += f",{key}={value}"
+                    f.write(metric_str + "\n")
 
     def wrap_model_ddp(self):
         if self.use_ddp:
@@ -924,9 +925,8 @@ class OptimizedUniRef50Trainer:
 
     def log_training_metrics(self, step: int, loss: float, lr: float, epoch: int,
                            batch_time: float = None, additional_metrics: dict = None):
-        """Log training metrics to Wandb (rank 0 only)."""
-        if self.rank != 0:
-            return
+        """Log training metrics - ALL RANKS participate."""
+        # All ranks participate in logging computation
 
         metrics = {
             'train/loss': loss,
