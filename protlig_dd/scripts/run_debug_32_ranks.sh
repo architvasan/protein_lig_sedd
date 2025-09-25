@@ -6,12 +6,15 @@
 # Set your environment variables
 export NUM_GPUS=32
 export PPN=4  # Processes per node (adjust based on your setup)
-export VENV_PATH="/path/to/your/venv"  # Replace with your actual venv path
-export DATAFILE="/path/to/your/processed_uniref50.pt"  # Replace with actual path
+export VENV_PATH="/eagle/FoundEpidem/avasan/IDEAL/DiffusionModels/protein_lig_sedd/prot_lig_sedd"  # Replace with your actual venv path
+export DATAFILE="./input_data/processed_uniref50.pt"  # Replace with actual path
 export DEVICE="cuda:0"
 
+module use /soft/modulefiles
+module load conda
+source $VENV_PATH/bin/activate
 # Create minimal debug config
-cat > /tmp/minimal_debug_config.yaml << EOF
+cat > ./minimal_debug_config.yaml << EOF
 model:
   d_model: 256
   n_layers: 4
@@ -43,7 +46,7 @@ mpirun -np $NUM_GPUS -ppn $PPN \
         ./shell_scripts/set_affinity_gpu_polaris.sh \
         $VENV_PATH/bin/python protlig_dd/training/run_train_uniref_ddp_polaris.py \
         --work_dir ./experiments/debug_32_ranks_super_minimal \
-        --config /tmp/minimal_debug_config.yaml \
+        --config ./minimal_debug_config.yaml \
         --datafile "$DATAFILE" \
         --device "$DEVICE" \
         --seed 42 \
