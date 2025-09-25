@@ -1983,28 +1983,12 @@ class OptimizedUniRef50Trainer:
     def train_step(self, batch):
         """Single training step with optimizations."""
         import time
-        import traceback
         step_start_time = time.time()
 
-        # Track train_step calls to catch multiple calls
-        if not hasattr(self, '_train_step_call_count'):
-            self._train_step_call_count = {}
-        step_key = self.state['step']
-        self._train_step_call_count[step_key] = self._train_step_call_count.get(step_key, 0) + 1
-
-        print(f"[Rank {self.rank}] train_step: Starting call #{self._train_step_call_count[step_key]} for step {step_key}, batch shape: {batch.shape}")
-
-        if self._train_step_call_count[step_key] > 1:
-            print(f"🚨 [Rank {self.rank}] WARNING: Multiple train_step calls for step {step_key}!")
-            print(f"🚨 [Rank {self.rank}] Call stack:")
-            traceback.print_stack()
-
         self.model.train()
-        print(f"[Rank {self.rank}] train_step: Set model to train mode")
 
         # Move batch to device and ensure correct shape
         batch = batch.to(self.device)
-        print(f"[Rank {self.rank}] train_step: Moved batch to device {self.device}")
 
         # Ensure batch is 2D: [batch_size, sequence_length]
         if batch.dim() > 2:
@@ -2013,38 +1997,20 @@ class OptimizedUniRef50Trainer:
             print(f"Reshaped batch to: {batch.shape}")
 
         # Compute loss with DDP-aware accumulation
-        print(f"[Rank {self.rank}] train_step: Starting loss computation")
         if self.use_ddp:
             # For DDP, disable gradient accumulation to avoid sync issues
             loss = self.compute_loss(batch)
             effective_accum = 1
-            print(f"[Rank {self.rank}] train_step: DDP loss computed: {loss.item():.4f}")
         else:
             loss = self.compute_loss(batch) / self.cfg.training.accum
             effective_accum = self.cfg.training.accum
-            print(f"[Rank {self.rank}] train_step: Single GPU loss computed: {loss.item():.4f}")
 
         # Backward pass with device-aware gradient scaling
         # Note: For DDP, we disabled gradient accumulation to avoid sync issues
-        print(f"[Rank {self.rank}] train_step: Starting backward pass (step {self.state['step']})")
-
-        # Add backward call tracking to catch multiple calls
-        if not hasattr(self, '_backward_call_count'):
-            self._backward_call_count = {}
-        step_key = self.state['step']
-        self._backward_call_count[step_key] = self._backward_call_count.get(step_key, 0) + 1
-
-        if self._backward_call_count[step_key] > 1:
-            print(f"🚨 [Rank {self.rank}] WARNING: Multiple backward calls at step {step_key}! Call #{self._backward_call_count[step_key]}")
-            print(f"🚨 [Rank {self.rank}] This will cause DDP deadlock! Skipping additional backward call.")
-            return loss.item(), time.time() - step_start_time, {}
-
         if self.scaler is not None:
             self.scaler.scale(loss).backward()
-            print(f"[Rank {self.rank}] train_step: Scaled backward pass completed")
         else:
             loss.backward()
-            print(f"[Rank {self.rank}] train_step: Backward pass completed")
 
         # Additional metrics for logging
         additional_metrics = {}
@@ -2057,11 +2023,9 @@ class OptimizedUniRef50Trainer:
             should_update = (self.state['step'] + 1) % self.cfg.training.accum == 0
 
         if should_update:
-            print(f"[Rank {self.rank}] train_step: Starting optimizer update")
             # Unscale gradients for clipping (CUDA only)
             if self.scaler is not None:
                 self.scaler.unscale_(self.optimizer)
-                print(f"[Rank {self.rank}] train_step: Unscaled gradients")
 
             # Compute gradient norm before clipping
             total_norm = 0
@@ -2071,7 +2035,6 @@ class OptimizedUniRef50Trainer:
                     total_norm += param_norm.item() ** 2
             total_norm = total_norm ** (1. / 2)
             additional_metrics['grad_norm'] = total_norm
-            print(f"[Rank {self.rank}] train_step: Computed grad norm: {total_norm:.4f}")
 
             # Clip gradients
             if self.cfg.optim.grad_clip > 0:
@@ -2079,44 +2042,22 @@ class OptimizedUniRef50Trainer:
                     chain(self.model.parameters(), self.noise.parameters()),
                     self.cfg.optim.grad_clip
                 )
-                print(f"[Rank {self.rank}] train_step: Clipped gradients")
-
-            # Debug: Log optimizer steps for DDP debugging
-            if self.use_ddp and self.state['step'] % 100 == 0:
-                print(f"[Rank {self.rank}] Optimizer step at global step {self.state['step']}")
 
             # Optimizer step with device-aware scaling
-            print(f"[Rank {self.rank}] train_step: About to call optimizer.step()")
             if self.scaler is not None:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
-                print(f"[Rank {self.rank}] train_step: Scaled optimizer step completed")
             else:
                 self.optimizer.step()
-                print(f"[Rank {self.rank}] train_step: Optimizer step completed")
-
-            print(f"[Rank {self.rank}] train_step: About to call scheduler.step()")
             self.scheduler.step()
-            print(f"[Rank {self.rank}] train_step: Scheduler step completed")
 
             # Update EMA
-            print(f"[Rank {self.rank}] train_step: Updating EMA")
             self.ema.update(self.model.parameters())
-            print(f"[Rank {self.rank}] train_step: EMA update completed")
 
             # Zero gradients
-            print(f"[Rank {self.rank}] train_step: Zeroing gradients")
             self.optimizer.zero_grad()
-            print(f"[Rank {self.rank}] train_step: Gradients zeroed")
-
-        # Add explicit barrier for DDP debugging
-        if self.use_ddp:
-            print(f"[Rank {self.rank}] train_step: About to call DDP barrier")
-            torch.distributed.barrier()
-            print(f"[Rank {self.rank}] train_step: DDP barrier completed")
 
         step_time = time.time() - step_start_time
-        print(f"[Rank {self.rank}] train_step: Completed, returning loss={loss.item():.4f}")
 
         return loss.item() * effective_accum, step_time, additional_metrics
 
@@ -2415,18 +2356,8 @@ class OptimizedUniRef50Trainer:
             progress_bar = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{total_epochs}')
 
             for batch in progress_bar:
-                # Debug: Print step info for all ranks
-                if step % 10 == 0:
-                    print(f"[Rank {self.rank}] Starting step {step}")
-
                 # Training step with timing
-                try:
-                    loss, step_time, additional_metrics = self.train_step(batch)
-                    if step % 10 == 0:
-                        print(f"[Rank {self.rank}] Completed train_step {step}, loss={loss:.4f}")
-                except Exception as e:
-                    print(f"[Rank {self.rank}] ERROR in train_step {step}: {e}")
-                    raise
+                loss, step_time, additional_metrics = self.train_step(batch)
 
                 epoch_loss += loss
                 running_loss += loss
@@ -2444,30 +2375,21 @@ class OptimizedUniRef50Trainer:
 
                 # Detailed logging
                 if step % self.cfg.training.log_freq == 0:
-                    print(f"[Rank {self.rank}] Starting logging at step {step}")
                     avg_loss = running_loss / self.cfg.training.log_freq
                     interval_time = time.time() - log_interval_start_time
 
                     # Log training metrics
-                    try:
-                        self.log_training_metrics(
-                            step=step,
-                            loss=avg_loss,
-                            lr=self.scheduler.get_last_lr()[0],
-                            epoch=epoch,
-                            batch_time=step_time,
-                            additional_metrics=additional_metrics
-                        )
-                        print(f"[Rank {self.rank}] Completed training metrics logging at step {step}")
-                    except Exception as e:
-                        print(f"[Rank {self.rank}] ERROR in training metrics logging at step {step}: {e}")
+                    self.log_training_metrics(
+                        step=step,
+                        loss=avg_loss,
+                        lr=self.scheduler.get_last_lr()[0],
+                        epoch=epoch,
+                        batch_time=step_time,
+                        additional_metrics=additional_metrics
+                    )
 
                     # Log system metrics
-                    try:
-                        self.log_system_metrics(step)
-                        print(f"[Rank {self.rank}] Completed system metrics logging at step {step}")
-                    except Exception as e:
-                        print(f"[Rank {self.rank}] ERROR in system metrics logging at step {step}: {e}")
+                    self.log_system_metrics(step)
 
                     # Reset running loss and timer
                     running_loss = 0.0
@@ -2524,17 +2446,9 @@ class OptimizedUniRef50Trainer:
 
                 # Comprehensive evaluation (skip in minimal mode)
                 if not self.minimal_mode and step % self.cfg.training.eval_freq == 0:
-                    print(f"[Rank {self.rank}] Starting comprehensive evaluation at step {step}")
-                    try:
-                        val_loss, generation_properties = self.comprehensive_evaluation(
-                            step, epoch, num_samples=10, sampling_method=self.sampling_method
-                        )
-                        print(f"[Rank {self.rank}] Completed comprehensive evaluation at step {step}")
-                    except Exception as e:
-                        print(f"[Rank {self.rank}] ERROR in comprehensive evaluation at step {step}: {e}")
-                        # Continue without failing
-                elif self.minimal_mode and step % self.cfg.training.eval_freq == 0:
-                    print(f"[Rank {self.rank}] Skipping evaluation at step {step} (minimal mode)")
+                    val_loss, generation_properties = self.comprehensive_evaluation(
+                        step, epoch, num_samples=10, sampling_method=self.sampling_method
+                    )
 
                     # Update best loss tracking
                     if val_loss < best_loss:
