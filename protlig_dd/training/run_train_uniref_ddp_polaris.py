@@ -2131,12 +2131,21 @@ class OptimizedUniRef50Trainer:
         print(f"Checkpoint saved: {checkpoint_path}")
 
     def cleanup_ddp(self):
-        """Clean up DDP process group."""
+        """Clean up DDP process group safely."""
         if self.use_ddp and torch.distributed.is_initialized():
             print("🔄 Cleaning up DDP process group...")
-            torch.distributed.barrier()  # Final sync before cleanup
-            torch.distributed.destroy_process_group()
-            print("✅ DDP process group destroyed")
+            try:
+                # Try barrier with timeout, but don't fail if it times out
+                torch.distributed.barrier(timeout=30)  # 30 second timeout
+                print("✅ Final barrier completed")
+            except Exception as e:
+                print(f"⚠️  Final barrier failed (continuing cleanup): {e}")
+
+            try:
+                torch.distributed.destroy_process_group()
+                print("✅ DDP process group destroyed")
+            except Exception as e:
+                print(f"⚠️  DDP cleanup failed: {e}")
 
     def train(self, wandb_project: str, wandb_name: str):
         """Main training loop with comprehensive Wandb logging."""
@@ -2330,11 +2339,7 @@ class OptimizedUniRef50Trainer:
                         print(f"⚠️  Warning: Could not compute reconstruction/fixed noise losses: {e}")
                         # Continue training even if logging fails
 
-                # Synchronization barrier: Wait for rank 0 to finish evaluation before continuing
-                if step % self.cfg.training.log_freq * 5 == 0 and step > 0 and self.use_ddp:
-                    torch.distributed.barrier()
-                    if self.rank == 0:
-                        print("   🔄 All ranks synchronized after evaluation")
+                # Note: No barrier needed here - only rank 0 does evaluation, others continue normally
 
                 # Quick generation test (more frequent than comprehensive evaluation)
                 quick_gen_freq = getattr(self.cfg.training, 'quick_gen_freq', self.cfg.training.log_freq * 10)
@@ -2346,9 +2351,7 @@ class OptimizedUniRef50Trainer:
                     val_loss, generation_properties = self.comprehensive_evaluation(
                         step, epoch, num_samples=10, sampling_method=self.sampling_method
                     )
-                    # Synchronization barrier after comprehensive evaluation
-                    if self.use_ddp:
-                        torch.distributed.barrier()
+                    # Note: No barrier needed - comprehensive_evaluation handles rank coordination internally
 
                     # Update best loss tracking
                     if val_loss < best_loss:
