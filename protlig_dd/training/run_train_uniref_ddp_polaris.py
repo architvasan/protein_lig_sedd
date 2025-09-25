@@ -1985,10 +1985,13 @@ class OptimizedUniRef50Trainer:
         import time
         step_start_time = time.time()
 
+        print(f"[Rank {self.rank}] train_step: Starting, batch shape: {batch.shape}")
         self.model.train()
+        print(f"[Rank {self.rank}] train_step: Set model to train mode")
 
         # Move batch to device and ensure correct shape
         batch = batch.to(self.device)
+        print(f"[Rank {self.rank}] train_step: Moved batch to device {self.device}")
 
         # Ensure batch is 2D: [batch_size, sequence_length]
         if batch.dim() > 2:
@@ -1997,20 +2000,26 @@ class OptimizedUniRef50Trainer:
             print(f"Reshaped batch to: {batch.shape}")
 
         # Compute loss with DDP-aware accumulation
+        print(f"[Rank {self.rank}] train_step: Starting loss computation")
         if self.use_ddp:
             # For DDP, disable gradient accumulation to avoid sync issues
             loss = self.compute_loss(batch)
             effective_accum = 1
+            print(f"[Rank {self.rank}] train_step: DDP loss computed: {loss.item():.4f}")
         else:
             loss = self.compute_loss(batch) / self.cfg.training.accum
             effective_accum = self.cfg.training.accum
+            print(f"[Rank {self.rank}] train_step: Single GPU loss computed: {loss.item():.4f}")
 
         # Backward pass with device-aware gradient scaling
         # Note: For DDP, we disabled gradient accumulation to avoid sync issues
+        print(f"[Rank {self.rank}] train_step: Starting backward pass")
         if self.scaler is not None:
             self.scaler.scale(loss).backward()
+            print(f"[Rank {self.rank}] train_step: Scaled backward pass completed")
         else:
             loss.backward()
+            print(f"[Rank {self.rank}] train_step: Backward pass completed")
 
         # Additional metrics for logging
         additional_metrics = {}
@@ -2023,9 +2032,11 @@ class OptimizedUniRef50Trainer:
             should_update = (self.state['step'] + 1) % self.cfg.training.accum == 0
 
         if should_update:
+            print(f"[Rank {self.rank}] train_step: Starting optimizer update")
             # Unscale gradients for clipping (CUDA only)
             if self.scaler is not None:
                 self.scaler.unscale_(self.optimizer)
+                print(f"[Rank {self.rank}] train_step: Unscaled gradients")
 
             # Compute gradient norm before clipping
             total_norm = 0
@@ -2035,6 +2046,7 @@ class OptimizedUniRef50Trainer:
                     total_norm += param_norm.item() ** 2
             total_norm = total_norm ** (1. / 2)
             additional_metrics['grad_norm'] = total_norm
+            print(f"[Rank {self.rank}] train_step: Computed grad norm: {total_norm:.4f}")
 
             # Clip gradients
             if self.cfg.optim.grad_clip > 0:
@@ -2042,26 +2054,44 @@ class OptimizedUniRef50Trainer:
                     chain(self.model.parameters(), self.noise.parameters()),
                     self.cfg.optim.grad_clip
                 )
+                print(f"[Rank {self.rank}] train_step: Clipped gradients")
 
             # Debug: Log optimizer steps for DDP debugging
             if self.use_ddp and self.state['step'] % 100 == 0:
                 print(f"[Rank {self.rank}] Optimizer step at global step {self.state['step']}")
 
             # Optimizer step with device-aware scaling
+            print(f"[Rank {self.rank}] train_step: About to call optimizer.step()")
             if self.scaler is not None:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+                print(f"[Rank {self.rank}] train_step: Scaled optimizer step completed")
             else:
                 self.optimizer.step()
+                print(f"[Rank {self.rank}] train_step: Optimizer step completed")
+
+            print(f"[Rank {self.rank}] train_step: About to call scheduler.step()")
             self.scheduler.step()
+            print(f"[Rank {self.rank}] train_step: Scheduler step completed")
 
             # Update EMA
+            print(f"[Rank {self.rank}] train_step: Updating EMA")
             self.ema.update(self.model.parameters())
+            print(f"[Rank {self.rank}] train_step: EMA update completed")
 
             # Zero gradients
+            print(f"[Rank {self.rank}] train_step: Zeroing gradients")
             self.optimizer.zero_grad()
+            print(f"[Rank {self.rank}] train_step: Gradients zeroed")
+
+        # Add explicit barrier for DDP debugging
+        if self.use_ddp:
+            print(f"[Rank {self.rank}] train_step: About to call DDP barrier")
+            torch.distributed.barrier()
+            print(f"[Rank {self.rank}] train_step: DDP barrier completed")
 
         step_time = time.time() - step_start_time
+        print(f"[Rank {self.rank}] train_step: Completed, returning loss={loss.item():.4f}")
 
         return loss.item() * effective_accum, step_time, additional_metrics
 
