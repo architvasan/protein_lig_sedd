@@ -1924,22 +1924,28 @@ class OptimizedUniRef50Trainer:
             device_type = str(self.device).split(':')[0]
             # Use DDP model for training
             model_to_use = self.model_ddp if self.use_ddp else self.model
+            # Use proper score entropy for loss computation
+            # Expand sigma to match sequence dimension if needed
+            if len(sigma.shape) == 1 and len(batch.shape) == 2:
+                sigma_expanded = sigma[:, None].expand(-1, batch.shape[1])
+            else:
+                sigma_expanded = sigma
 
             if self.use_amp and device_type == 'xpu':
                 with torch.xpu.amp.autocast():
                     log_score = model_to_use(perturbed_batch, sigma)
-                    loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+                    loss = self.graph.score_entropy(log_score, sigma_expanded , perturbed_batch, batch)#sigma[:, None]
             elif self.use_amp and device_type == 'cuda':
                 with torch.cuda.amp.autocast():
                     log_score = model_to_use(perturbed_batch, sigma)
-                    loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+                    loss = self.graph.score_entropy(log_score, sigma_expanded, perturbed_batch, batch)#sigma[:, None]
 
                     # Weight by dsigma for better training dynamics
                     loss = (dsigma[:, None] * loss).mean()
             else:
                 # No autocast for CPU/MPS
                 log_score = model_to_use(perturbed_batch, sigma)
-                loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+                loss = self.graph.score_entropy(log_score, sigma_expanded, perturbed_batch, batch) #sigma[:, None]
 
                 # Weight by dsigma for better training dynamics
                 loss = (dsigma[:, None] * loss).mean()
