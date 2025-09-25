@@ -404,6 +404,7 @@ class OptimizedUniRef50Trainer:
     epochs_override: Optional[int] = None  # Override epochs for hyperparameter sweeps
     use_ddp: bool = True
     use_wandb: bool = True  # Toggle wandb logging on/off
+    minimal_mode: bool = False  # Minimal mode for large-scale DDP debugging
 
     def __post_init__(self):
         """Initialize trainer components."""
@@ -805,6 +806,10 @@ class OptimizedUniRef50Trainer:
 
     def log_metrics(self, metrics, step=None):
         """Log metrics to wandb or file - ALL RANKS log everything."""
+        # Skip logging in minimal mode to prevent sync issues
+        if self.minimal_mode:
+            return
+
         # ALL ranks log everything to prevent sync issues
         if self.use_wandb:
             wandb.log(metrics, step=step)
@@ -2355,8 +2360,18 @@ class OptimizedUniRef50Trainer:
             progress_bar = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{total_epochs}')
 
             for batch in progress_bar:
+                # Debug: Print step info for all ranks
+                if step % 10 == 0:
+                    print(f"[Rank {self.rank}] Starting step {step}")
+
                 # Training step with timing
-                loss, step_time, additional_metrics = self.train_step(batch)
+                try:
+                    loss, step_time, additional_metrics = self.train_step(batch)
+                    if step % 10 == 0:
+                        print(f"[Rank {self.rank}] Completed train_step {step}, loss={loss:.4f}")
+                except Exception as e:
+                    print(f"[Rank {self.rank}] ERROR in train_step {step}: {e}")
+                    raise
 
                 epoch_loss += loss
                 running_loss += loss
@@ -2374,21 +2389,30 @@ class OptimizedUniRef50Trainer:
 
                 # Detailed logging
                 if step % self.cfg.training.log_freq == 0:
+                    print(f"[Rank {self.rank}] Starting logging at step {step}")
                     avg_loss = running_loss / self.cfg.training.log_freq
                     interval_time = time.time() - log_interval_start_time
 
                     # Log training metrics
-                    self.log_training_metrics(
-                        step=step,
-                        loss=avg_loss,
-                        lr=self.scheduler.get_last_lr()[0],
-                        epoch=epoch,
-                        batch_time=step_time,
-                        additional_metrics=additional_metrics
-                    )
+                    try:
+                        self.log_training_metrics(
+                            step=step,
+                            loss=avg_loss,
+                            lr=self.scheduler.get_last_lr()[0],
+                            epoch=epoch,
+                            batch_time=step_time,
+                            additional_metrics=additional_metrics
+                        )
+                        print(f"[Rank {self.rank}] Completed training metrics logging at step {step}")
+                    except Exception as e:
+                        print(f"[Rank {self.rank}] ERROR in training metrics logging at step {step}: {e}")
 
                     # Log system metrics
-                    self.log_system_metrics(step)
+                    try:
+                        self.log_system_metrics(step)
+                        print(f"[Rank {self.rank}] Completed system metrics logging at step {step}")
+                    except Exception as e:
+                        print(f"[Rank {self.rank}] ERROR in system metrics logging at step {step}: {e}")
 
                     # Reset running loss and timer
                     running_loss = 0.0
@@ -2443,12 +2467,19 @@ class OptimizedUniRef50Trainer:
                 if step % quick_gen_freq == 0 and step > 0:
                     self.quick_generation_test(step, epoch)
 
-                # Comprehensive evaluation
-                if step % self.cfg.training.eval_freq == 0:
-                    val_loss, generation_properties = self.comprehensive_evaluation(
-                        step, epoch, num_samples=10, sampling_method=self.sampling_method
-                    )
-                    # Note: No barrier needed - comprehensive_evaluation handles rank coordination internally
+                # Comprehensive evaluation (skip in minimal mode)
+                if not self.minimal_mode and step % self.cfg.training.eval_freq == 0:
+                    print(f"[Rank {self.rank}] Starting comprehensive evaluation at step {step}")
+                    try:
+                        val_loss, generation_properties = self.comprehensive_evaluation(
+                            step, epoch, num_samples=10, sampling_method=self.sampling_method
+                        )
+                        print(f"[Rank {self.rank}] Completed comprehensive evaluation at step {step}")
+                    except Exception as e:
+                        print(f"[Rank {self.rank}] ERROR in comprehensive evaluation at step {step}: {e}")
+                        # Continue without failing
+                elif self.minimal_mode and step % self.cfg.training.eval_freq == 0:
+                    print(f"[Rank {self.rank}] Skipping evaluation at step {step} (minimal mode)")
 
                     # Update best loss tracking
                     if val_loss < best_loss:
@@ -2590,6 +2621,8 @@ def main():
                        help="Use streaming mode for very large files (>50GB)")
     parser.add_argument("--no_wandb", action="store_true",
                        help="Disable wandb logging and use file logging instead")
+    parser.add_argument("--minimal_mode", action="store_true",
+                       help="Minimal mode: disable evaluations and complex logging for large-scale DDP debugging")
 
     args = parser.parse_args()
 
@@ -2624,7 +2657,8 @@ def main():
             force_fresh_start=args.fresh,
             sampling_method=args.sampling_method,
             epochs_override=args.epochs,
-            use_wandb=not args.no_wandb
+            use_wandb=not args.no_wandb,
+            minimal_mode=args.minimal_mode
         )
 
         # Set tokenization and streaming options
