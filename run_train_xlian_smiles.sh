@@ -17,8 +17,8 @@ export PYTHONPATH="/lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd:$PYTHO
 WORK_DIR="/lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd/experiments/smiles_$(date +%Y%m%d_%H%M%S)"
 #CONFIG_FILE="/lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd/configs/config.yaml"
 CONFIG_FILE="/lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd/configs/config_pubchem_smiles.yaml"
-#DATA_FILE="/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/protein_lig_sedd/input_data/processed_pubchem.pt"
-DATA_FILE="/lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd/input_data/processed_pubchem_subset_1k.pt"
+DATA_FILE="/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/protein_lig_sedd/input_data/processed_pubchem.pt"
+#DATA_FILE="/lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd/input_data/processed_pubchem_subset_1k.pt"
 
 # Run training
 cd /lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd

@@ -506,7 +506,7 @@ class SMILESTrainer:
         print("Optimizer ready.")
 
     def compute_loss(self, batch):
-        """Compute loss following the pattern from run_train_uniref50_optimized.py"""
+        """Compute loss following the pattern from run_train_uniref_ddp_polaris.py"""
         # Ensure batch is 2D: [batch_size, sequence_length]
         if batch.dim() != 2:
             print(f"WARNING: compute_loss received {batch.dim()}D batch with shape {batch.shape}")
@@ -521,24 +521,55 @@ class SMILESTrainer:
         sigma, dsigma = self.noise(t)
 
         # Sample transition (add noise to the data)
-        perturbed_batch = self.graph.sample_transition(batch, sigma)
+        perturbed_batch = self.graph.sample_transition(batch, sigma[:, None])
 
-        # Validate perturbed_batch is 2D: [batch_size, sequence_length]
+        # Fix perturbed_batch shape if needed - reshape to 2D before validation
+        if perturbed_batch.dim() > 2:
+            #print(f"WARNING: perturbed_batch has {perturbed_batch.dim()}D shape {perturbed_batch.shape}, reshaping to 2D")
+            perturbed_batch = perturbed_batch.view(perturbed_batch.shape[0], -1)
+            #print(f"Reshaped perturbed_batch to: {perturbed_batch.shape}")
+            
+            # Also reshape batch to match perturbed_batch dimensions
+            if batch.shape[1] != perturbed_batch.shape[1]:
+                #print(f"WARNING: batch shape {batch.shape} doesn't match perturbed_batch {perturbed_batch.shape}")
+                batch = batch.view(batch.shape[0], -1)
+                # If still doesn't match, pad or truncate
+                if batch.shape[1] != perturbed_batch.shape[1]:
+                    target_len = perturbed_batch.shape[1]
+                    if batch.shape[1] < target_len:
+                        # Pad batch to match perturbed_batch
+                        padding = target_len - batch.shape[1]
+                        batch = torch.cat([batch, torch.zeros(batch.shape[0], padding, device=batch.device, dtype=batch.dtype)], dim=1)
+                    else:
+                        # Truncate batch to match perturbed_batch
+                        batch = batch[:, :target_len]
+                #print(f"Adjusted batch to: {batch.shape}")
+
+        # Validate perturbed_batch is now 2D: [batch_size, sequence_length]
         if perturbed_batch.dim() != 2:
             raise ValueError(f"perturbed_batch must be 2D [batch_size, seq_len], got {perturbed_batch.dim()}D with shape {perturbed_batch.shape}")
 
-        # Forward pass with device-aware autocast
+        # Forward pass with device-aware autocast and shape validation
         try:
-            if self.use_amp and str(self.device).split(':')[0] == 'cuda':
-                with torch.cuda.amp.autocast():
+            device_type = str(self.device).split(':')[0]
+            if self.use_amp and device_type == 'xpu':
+                with torch.xpu.amp.autocast():
                     log_score = self.model(perturbed_batch, sigma)
                     loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+            elif self.use_amp and device_type == 'cuda':
+                with torch.amp.autocast('cuda'):
+                    sigma_expanded = sigma[:, None].expand(-1, batch.shape[1])
+
+                    log_score = self.model(perturbed_batch, sigma)
+                    loss = self.graph.score_entropy(log_score, sigma_expanded, perturbed_batch, batch)
+
                     # Weight by dsigma for better training dynamics
                     loss = (dsigma[:, None] * loss).mean()
             else:
                 # No autocast for CPU/MPS
                 log_score = self.model(perturbed_batch, sigma)
                 loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+
                 # Weight by dsigma for better training dynamics
                 loss = (dsigma[:, None] * loss).mean()
         except Exception as e:
@@ -546,6 +577,7 @@ class SMILESTrainer:
                 print(f"❌ Shape error in model forward pass:")
                 print(f"   perturbed_batch shape: {perturbed_batch.shape}")
                 print(f"   sigma shape: {sigma.shape}")
+                print(f"   batch shape: {batch.shape}")
                 print(f"   Error: {e}")
 
                 # Try to fix the shape issue
@@ -555,8 +587,14 @@ class SMILESTrainer:
                     print(f"   Fixed shape: {perturbed_batch.shape}")
 
                     # Retry the forward pass
-                    if self.use_amp and str(self.device).split(':')[0] == 'cuda':
-                        with torch.cuda.amp.autocast():
+                    device_type = str(self.device).split(':')[0]
+                    if self.use_amp and device_type == 'xpu':
+                        with torch.xpu.amp.autocast():
+                            log_score = self.model(perturbed_batch, sigma)
+                            loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+                            loss = (dsigma[:, None] * loss).mean()
+                    elif self.use_amp and device_type == 'cuda':
+                        with torch.amp.autocast('cuda'):
                             log_score = self.model(perturbed_batch, sigma)
                             loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
                             loss = (dsigma[:, None] * loss).mean()
@@ -568,7 +606,7 @@ class SMILESTrainer:
                     raise e
             else:
                 raise e
-
+        
         return loss
 
     def train(self, project_name: str, run_name: str):
@@ -609,9 +647,9 @@ class SMILESTrainer:
 
                 # Ensure batch is 2D: [batch_size, sequence_length]
                 if batch.dim() > 2:
-                    print(f"WARNING: Batch has {batch.dim()} dimensions, reshaping from {batch.shape}")
+                    #print(f"WARNING: Batch has {batch.dim()} dimensions, reshaping from {batch.shape}")
                     batch = batch.view(batch.shape[0], -1)
-                    print(f"Reshaped batch to: {batch.shape}")
+                    #print(f"Reshaped batch to: {batch.shape}")
 
                 # Compute loss using the inline method
                 loss = self.compute_loss(batch) / self.cfg.training.accum
