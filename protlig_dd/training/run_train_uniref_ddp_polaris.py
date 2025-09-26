@@ -1949,6 +1949,7 @@ class OptimizedUniRef50Trainer:
 
                 # Weight by dsigma for better training dynamics
                 loss = (dsigma[:, None] * loss).mean()
+
         except Exception as e:
             if "Wrong shape" in str(e) or "einops" in str(e).lower():
                 print(f"❌ Shape error in model forward pass:")
