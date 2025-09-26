@@ -28,7 +28,7 @@ EXECUTION_MODE="interactive"       # Options: "interactive", "queue"
                             # interactive: Run training directly (for testing/debugging)
                             # queue: Submit PBS job to Polaris queue system
 
-NODES=8                      # Number of nodes
+NODES=2                      # Number of nodes
 
 # Training Configuration
 PWD="/eagle/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd"
@@ -169,7 +169,8 @@ if [ "$EXECUTION_MODE" = "interactive" ]; then
 
     # Set environment variables
     export PYTHONPATH="$VENV_PATH/bin/python"#"$VENV_PATH:$PYTHONPATH"
-    mpirun -np $NUM_GPUS -ppn $PPN \
+
+        mpirun -np 8 -ppn $PPN \
         --cpu-bind depth -d 16 \
         --hostfile $PBS_NODEFILE \
         ./shell_scripts/set_affinity_gpu_polaris.sh \
@@ -182,9 +183,8 @@ if [ "$EXECUTION_MODE" = "interactive" ]; then
         --wandb_name "$RUN_NAME" \
         --device "$DEVICE" \
         --seed $SEED \
-        $FRESH_FLAG 2>&1 | tee "$LOG_DIR/polaris_ddp_interactive_nodes${NODES}.log"
+        $FRESH_FLAG 2>&1 | tee "$LOG_DIR/polaris_ddp_interactive.log"
 
-    #./shell_scripts/set_affinity_gpu_polaris.sh \
     #--no_wandb \
     # Check exit status
     if [ $? -eq 0 ]; then

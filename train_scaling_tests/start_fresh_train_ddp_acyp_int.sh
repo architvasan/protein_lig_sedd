@@ -28,7 +28,7 @@ EXECUTION_MODE="interactive"       # Options: "interactive", "queue"
                             # interactive: Run training directly (for testing/debugging)
                             # queue: Submit PBS job to Polaris queue system
 
-NODES=8                      # Number of nodes
+NODES=2                      # Number of nodes
 
 # Training Configuration
 PWD="/eagle/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd"
@@ -46,8 +46,8 @@ LOG_DIR="${PWD}/logs"               # Log directory
 
 WORK_DIR="${PWD}/experiments/polaris_ddp_${NODES}nodes$(date +%Y%m%d_%H%M%S)"
 CONFIG_FILE="${PWD}/configs/config_uniref50.yaml"
-DATAFILE="${PWD}/input_data/processed_uniref50.pt"
-WANDB_PROJECT="uniref50_polaris_ddp"
+DATAFILE="${PWD}/input_data/acyp_data.pt"
+WANDB_PROJECT="acyp_polaris_ddp"
 DEVICE="cuda"  # Polaris uses NVIDIA CUDA
 SEED=42
 
@@ -182,7 +182,7 @@ if [ "$EXECUTION_MODE" = "interactive" ]; then
         --wandb_name "$RUN_NAME" \
         --device "$DEVICE" \
         --seed $SEED \
-        $FRESH_FLAG 2>&1 | tee "$LOG_DIR/polaris_ddp_interactive_nodes${NODES}.log"
+        $FRESH_FLAG 2>&1 | tee "$LOG_DIR/acyp_polaris_ddp_interactive_nodes${NODES}.log"
 
     #./shell_scripts/set_affinity_gpu_polaris.sh \
     #--no_wandb \
