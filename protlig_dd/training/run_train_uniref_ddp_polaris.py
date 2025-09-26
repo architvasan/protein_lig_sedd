@@ -850,7 +850,7 @@ class OptimizedUniRef50Trainer:
         print("🚀 Setting up Wandb logging...")
 
         # Initialize wandb only on rank 0
-        if self.rank == 0:
+        if True:#self.rank == 0:
             run = wandb.init(
                 project=project_name,
                 name=run_name,
@@ -1931,8 +1931,10 @@ class OptimizedUniRef50Trainer:
                     loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
             elif self.use_amp and device_type == 'cuda':
                 with torch.cuda.amp.autocast():
+                    sigma_expanded = sigma[:, None].expand(-1, batch.shape[1])
+
                     log_score = model_to_use(perturbed_batch, sigma)
-                    loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+                    loss = self.graph.score_entropy(log_score, sigma_expanded, perturbed_batch, batch)#sigma[:, None]
 
                     # Weight by dsigma for better training dynamics
                     loss = (dsigma[:, None] * loss).mean()
@@ -1999,7 +2001,7 @@ class OptimizedUniRef50Trainer:
         # Compute loss with DDP-aware accumulation
         if self.use_ddp:
             # For DDP, disable gradient accumulation to avoid sync issues
-            loss = self.compute_loss(batch)
+            loss = self.compute_loss(batch) / self.cfg.training.accum
             effective_accum = self.cfg.training.accum
         else:
             loss = self.compute_loss(batch) / self.cfg.training.accum
@@ -2067,7 +2069,7 @@ class OptimizedUniRef50Trainer:
             print("calculating recon loss")
             # Use small timestep that gives meaningful dsigma (above noise minimum)
             # This approximates the reconstruction task while keeping score_entropy meaningful
-            t = torch.full((batch.shape[0],), 0.01, device=self.device)
+            t = torch.full((batch.shape[0],), 0.05, device=self.device)
 
             # Get sigma and dsigma from noise scheduler (proper way)
             sigma, dsigma = self.noise(t)

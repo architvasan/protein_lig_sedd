@@ -61,7 +61,7 @@ monitoring:
 ngpus: 1
 noise:
   eps: 0.02
-  sigma_max: 0.9
+  sigma_max: 0.95
   sigma_min: 0.01
   type: cosine
 optim:
