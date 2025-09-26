@@ -3311,3 +3311,4 @@ test_mpi.err
 test_torchru.nsi
 experiments/
 test_torchrun.sh
+minimal_debug_config.yaml
