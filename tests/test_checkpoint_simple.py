@@ -16,40 +16,35 @@ from pathlib import Path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 def create_test_config(temp_dir):
-    """Create a minimal config for testing."""
-    config = {
-        'model': {
-            'd_model': 64,
-            'n_layers': 2,
-            'n_heads': 4,
-            'vocab_size': 25,
-        },
+    """Create a minimal config for testing using the standard config format."""
+    # Import the config utilities
+    sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'configs'))
+    from config_uniref_dict import get_minimal_test_config
+
+    # Get the minimal test config
+    config = get_minimal_test_config()
+
+    # Override with even more minimal settings for this test
+    config.update({
         'training': {
+            **config['training'],
             'batch_size': 2,
             'n_iters': 10,  # Very short training
             'log_freq': 5,
             'eval_freq': 999,  # No evaluation
-            'save_freq': 5,    # Save checkpoint at step 5
+            'snapshot_freq': 5,    # Save checkpoint at step 5
             'accum': 1,
         },
-        'optim': {
-            'lr': 1e-4,
-            'grad_clip': 1.0,
-            'weight_decay': 0.01,
-        },
         'data': {
+            **config['data'],
             'max_protein_len': 16,  # Very short sequences
         },
-        'noise': {
-            'sigma_min': 0.01,
-            'sigma_max': 1.0,
-        }
-    }
-    
+    })
+
     config_path = os.path.join(temp_dir, 'test_config.yaml')
     with open(config_path, 'w') as f:
         yaml.dump(config, f)
-    
+
     return config_path
 
 def create_dummy_data(temp_dir):
