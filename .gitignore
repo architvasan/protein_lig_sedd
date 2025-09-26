@@ -21,8 +21,7 @@ core
 *.jsonl
 prot_lig_sedd/
 
-# Temporary test and debug files
-test_*.py
+# Temporary debug files (but allow tests/ directory)
 debug_*.py
 verify_*.py
 diagnose_*.py
