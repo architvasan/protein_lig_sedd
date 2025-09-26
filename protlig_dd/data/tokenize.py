@@ -11,7 +11,7 @@ class Tok_Mol:
         self.mol_tokenizer = AutoTokenizer.from_pretrained(self.mol_model_id, trust_remote_code=True, padding='max_length', max_length=128)#202)
     def tokenize(self, smiles_list):
         #Tokenize ligands & get embeddings
-        mol_inputs = self.mol_tokenizer(smiles_list, padding='max_length', max_length=128, truncation=True, return_tensors="pt").to('cuda')
+        mol_inputs = self.mol_tokenizer(smiles_list, padding='max_length', max_length=128, truncation=True, return_tensors="pt")#.to('cuda')
         return mol_inputs
 
 @dataclass

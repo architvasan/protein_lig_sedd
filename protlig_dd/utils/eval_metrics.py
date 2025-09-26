@@ -191,7 +191,7 @@ class ProteinEvaluator:
                 inputs = self.protein_tokenizer(
                     batch_seqs,
                     return_tensors="pt",
-                    padding=True,
+                    padding='max_length',
                     truncation=True,
                     max_length=1022  # Consistent with __post_init__
                 )

@@ -67,7 +67,6 @@ class EulerPredictor(Predictor):
                             protein_indices = prot_indices,
                             timesteps = sigma.reshape(-1),
                             mode = task)
-            print(f"Shape of score in predictor: {score.size()}")
         elif task == "protein_given_ligand" or task == "protein_only":
             score = score_model(
                             protein_indices = x,
