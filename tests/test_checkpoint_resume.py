@@ -4,6 +4,7 @@ Unit tests for checkpoint loading and training resumption.
 Tests the critical functionality of saving/loading model state and continuing training.
 """
 
+from mpi4py import MPI
 import pytest
 import torch
 import tempfile
@@ -33,33 +34,188 @@ class TestCheckpointResume:
     def minimal_config(self, temp_dir):
         """Create minimal config for testing."""
         config = {
-            'model': {
-                'd_model': 128,
-                'n_layers': 2,
-                'n_heads': 4,
-                'vocab_size': 25,  # 20 amino acids + special tokens
+        # Curriculum learning settings
+        'curriculum': {
+            'enabled': True,
+            'probabilistic': True,
+            'preschool_time': 2500,
+            # Alternative curriculum settings (commented in YAML):
+            # 'difficulty_ramp': 'exponential',
+        },
+        # Data configuration
+        'data': {
+            'cache_dir': 'data',
+            'max_ligand_len': 128,
+            'max_protein_len': 32,
+            'train': 'uniref50',
+            'train_ratio': 0.95,
+            'use_structure': False,
+            'val_ratio': 0.05,
+            'valid': 'uniref50',
+            'vocab_size_ligand': 2364,
+            'vocab_size_protein': 36,
+        },
+
+        # Evaluation settings
+        'eval': {
+            'batch_size': 16,
+            'perplexity': True,
+            'perplexity_batch_size': 8,
+        },
+
+        # Graph configuration
+        'graph': {
+            'file': 'data',
+            'report_all': False,
+            'type': 'absorb',
+        },
+
+        # Hydra configuration (for experiment tracking)
+        'hydra': {
+            'run': {
+                'dir': 'exp_local/uniref50/${now:%Y.%m.%d}/${now:%H%M%S}',
             },
-            'training': {
-                'batch_size': 4,
-                'n_iters': 20,
-                'log_freq': 5,
-                'eval_freq': 10,
-                'save_freq': 10,
-                'accum': 1,
-            },
-            'optim': {
-                'lr': 1e-4,
-                'grad_clip': 1.0,
-                'weight_decay': 0.01,
-            },
-            'data': {
-                'max_protein_len': 32,
-            },
-            'noise': {
-                'sigma_min': 0.01,
-                'sigma_max': 1.0,
-            }
-        }
+        },
+
+        # Learning rate schedule
+        'lr_schedule': {
+            'max_steps': 5000000,
+            'min_lr_ratio': 0.1,
+            'type': 'cosine_with_warmup',
+            'warmup_steps': 2000,
+        },
+
+        # Memory optimization settings
+        'memory': {
+            'gradient_checkpointing': True,
+            'max_memory_per_gpu': 0.9,
+            'mixed_precision': True,
+        },
+
+        # Model architecture
+        'model': {
+            'cond_dim': 128,
+            'device': 'cuda:0',
+            'dropout': 0.1,
+            'esm_dim': 640,
+            'hidden_size': 256,
+            'length': 32,
+            'molformer_dim': 768,
+            'n_blocks_lig': 8,
+            'n_blocks_prot': 20,
+            'n_heads': 4,
+            'name': 'medium',
+            'scale_by_sigma': True,
+            'type': 'ddit',
+        },
+
+        # Monitoring and logging
+        'monitoring': {
+            'log_gradients': True,
+            'log_weights': False,
+            'sample_frequency': 5000,
+        },
+
+        # GPU configuration
+        'ngpus': 1,
+
+        # Noise schedule
+        'noise': {
+            'eps': 0.02,
+            'sigma_max': 0.95,
+            'sigma_min': 0.01,
+            'type': 'cosine',
+        },
+
+        # Optimizer settings
+        'optim': {
+            'beta1': 0.9,
+            'beta2': 0.95,
+            'eps': 1e-08,
+            'grad_clip': 1.0,
+            'lr': 0.00002,
+            'optimizer': 'AdamW',
+            'warmup': 2500,
+            'weight_decay': 0.01,
+        },
+
+        # Sampling configuration
+        'sampling': {
+            'noise_removal': True,
+            'predictor': 'euler',
+            'steps': 50,
+        },
+
+        # Token vocabulary size
+        'tokens': 25,
+
+        # Training configuration
+        'training': {
+            'accum': 1,
+            'batch_size': 4,
+            'ema': 0.999,
+            'epochs': 5,
+            'eval_freq': 2000,
+            'force_reprocess': False,
+            'log_freq': 20,
+            'max_samples': 50000000,
+            'n_iters': 25000,
+            'num_workers': 4,
+            'seed': 42,
+            'snapshot_freq': 1000,
+            'snapshot_freq_for_preemption': 1000,
+            'snapshot_sampling': True,
+            'task': 'protein_only',
+            'weight': 'standard',
+        },
+
+        # Work directory
+        'work_dir': '/Users/ramanathana/Work/Protein-Ligand-SEDD/protein_lig_sedd',
+
+        # Defaults (Hydra-specific)
+        'defaults': [
+            '_self_',
+            {'model': 'medium'},
+        ],
+    }
+    #    config = {
+    #        'tokens': 28,
+    #        'model': {
+    #            'd_model': 128,
+    #            'n_layers': 2,
+    #            'n_heads': 4,
+    #            'vocab_size': 25,  # 20 amino acids + special tokens
+    #        },
+    #        'training': {
+    #            'batch_size': 4,
+    #            'n_iters': 20,
+    #            'log_freq': 5,
+    #            'eval_freq': 10,
+    #            'save_freq': 10,
+    #            'accum': 1,
+    #            'ema': 0.999
+    #        },
+    #        'optim': {
+    #            'lr': 1e-4,
+    #            'grad_clip': 1.0,
+    #            'weight_decay': 0.01,
+    #        },
+    #        'data': {
+    #            'max_protein_len': 32,
+    #        },
+    #        'noise': {
+    #            'sigma_min': 0.01,
+    #            'sigma_max': 1.0,
+    #        },
+    #        'graph': {
+    #            'type': 'absorb'
+    #        },
+    #        'noise': {
+    #            'type': 'cosine',
+    #            'sigma_min': 0.01,
+    #            'sigma_max': 0.95
+    #            }
+    #    }
         
         config_path = os.path.join(temp_dir, 'test_config.yaml')
         with open(config_path, 'w') as f:
@@ -75,11 +231,16 @@ class TestCheckpointResume:
         seq_len = 32
         num_samples = 100
         
+        sample_list = []
         # Generate random sequences (representing tokenized proteins)
         sequences = torch.randint(0, vocab_size-1, (num_samples, seq_len))
         
+        for seq in sequences:
+            sample_list.append({'prot_tokens': seq})
+        
         data_path = os.path.join(temp_dir, 'dummy_data.pt')
-        torch.save(sequences, data_path)
+        torch.save(sample_list, data_path)
+        print(sample_list)
         
         return data_path
     
@@ -99,7 +260,7 @@ class TestCheckpointResume:
         )
         
         # Run a few training steps
-        trainer.train()
+        trainer.train(wandb_project='test_chk', wandb_name='test_chk')
         
         # Check that checkpoint was created
         checkpoint_dir = os.path.join(temp_dir, 'checkpoints')
@@ -135,7 +296,7 @@ class TestCheckpointResume:
         )
         
         # Train for a few steps
-        trainer1.train()
+        trainer1.train(wandb_project = 'test_checkpointing', wandb_name = 'test_chck')
         
         # Get the final state
         final_step_1 = trainer1.state['step']
@@ -188,7 +349,7 @@ class TestCheckpointResume:
             minimal_mode=True
         )
         
-        trainer1.train()
+        trainer1.train(wandb_project='test_chk', wandb_name='test_chk')
         final_step_1 = trainer1.state['step']
         
         # Second training run with fresh start
@@ -226,7 +387,7 @@ class TestCheckpointResume:
             minimal_mode=True
         )
         
-        trainer1.train()
+        trainer1.train(wandb_project='test_chk', wandb_name='test_chk')
         
         # Modify config (change learning rate)
         with open(minimal_config, 'r') as f:
@@ -273,7 +434,7 @@ class TestCheckpointResume:
             minimal_mode=True
         )
         
-        trainer1.train()
+        trainer1.train(wandb_project='test_chk', wandb_name='test_chk')
         
         # Corrupt the checkpoint file
         checkpoint_dir = os.path.join(temp_dir, 'checkpoints')

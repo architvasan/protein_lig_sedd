@@ -1,0 +1,325 @@
+Traceback (most recent call last):
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/rotary.py", line 78, in apply_rotary_pos_emb
+    return flash_attn.layers.rotary.apply_rotary_emb_qkv_(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/flash_attn/layers/rotary.py", line 233, in apply_rotary_emb_qkv_
+    return ApplyRotaryEmbQKV_.apply(qkv, cos, sin, cos_k, sin_k, interleaved, seqlen_offsets)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/autograd/function.py", line 598, in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/flash_attn/layers/rotary.py", line 151, in forward
+    apply_rotary(
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/flash_attn/ops/triton/rotary.py", line 202, in apply_rotary
+    rotary_kernel[grid](
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/triton/runtime/jit.py", line 167, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/triton/runtime/jit.py", line 425, in run
+    kernel.run(grid_0, grid_1, grid_2, kernel.num_warps, kernel.num_ctas,  # number of warps/ctas per instance
+ValueError: Pointer argument (at 0) cannot be accessed from Triton (cpu tensor?)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/training/run_train_uniref_ddp_polaris.py", line 1105, in generate_protein_sequences_rigorous
+    samples = sampler(model_wrapper, task="protein_only")
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/sampling/sampling.py", line 164, in pc_sampler
+    x = predictor.update_fn(score_model=model, x=x, t=t, step_size=dt, task=task, prot_indices = prot_indices, lig_indices = lig_indices)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/sampling/sampling.py", line 72, in update_fn
+    score = score_model(
+            ^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/training/run_train_uniref_ddp_polaris.py", line 1056, in __call__
+    return model_to_use(protein_indices, timesteps)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/transformer_v100.py", line 588, in forward
+    x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/transformer_v100.py", line 427, in forward
+    qkv = rotary.apply_rotary_pos_emb(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/rotary.py", line 87, in apply_rotary_pos_emb
+    return _apply_rotary_pos_emb_native(qkv, cos, sin)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/rotary.py", line 69, in _apply_rotary_pos_emb_native
+    return (qkv * cos) + (_rotate_half(qkv) * sin)
+            ~~~~^~~~~
+RuntimeError: The size of tensor a (64) must match the size of tensor b (32) at non-singleton dimension 4
+Epoch 1/5:   0%|          | 0/23 [00:00<?, ?it/s]Epoch 1/5:   0%|          | 0/23 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/rotary.py", line 78, in apply_rotary_pos_emb
+    return flash_attn.layers.rotary.apply_rotary_emb_qkv_(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/flash_attn/layers/rotary.py", line 233, in apply_rotary_emb_qkv_
+    return ApplyRotaryEmbQKV_.apply(qkv, cos, sin, cos_k, sin_k, interleaved, seqlen_offsets)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/autograd/function.py", line 598, in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/flash_attn/layers/rotary.py", line 151, in forward
+    apply_rotary(
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/flash_attn/ops/triton/rotary.py", line 202, in apply_rotary
+    rotary_kernel[grid](
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/triton/runtime/jit.py", line 167, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/triton/runtime/jit.py", line 425, in run
+    kernel.run(grid_0, grid_1, grid_2, kernel.num_warps, kernel.num_ctas,  # number of warps/ctas per instance
+ValueError: Pointer argument (at 0) cannot be accessed from Triton (cpu tensor?)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/training/run_train_uniref_ddp_polaris.py", line 1105, in generate_protein_sequences_rigorous
+    samples = sampler(model_wrapper, task="protein_only")
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/sampling/sampling.py", line 164, in pc_sampler
+    x = predictor.update_fn(score_model=model, x=x, t=t, step_size=dt, task=task, prot_indices = prot_indices, lig_indices = lig_indices)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/sampling/sampling.py", line 72, in update_fn
+    score = score_model(
+            ^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/training/run_train_uniref_ddp_polaris.py", line 1056, in __call__
+    return model_to_use(protein_indices, timesteps)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/transformer_v100.py", line 588, in forward
+    x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/transformer_v100.py", line 427, in forward
+    qkv = rotary.apply_rotary_pos_emb(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/rotary.py", line 87, in apply_rotary_pos_emb
+    return _apply_rotary_pos_emb_native(qkv, cos, sin)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/rotary.py", line 69, in _apply_rotary_pos_emb_native
+    return (qkv * cos) + (_rotate_half(qkv) * sin)
+            ~~~~^~~~~
+RuntimeError: The size of tensor a (64) must match the size of tensor b (32) at non-singleton dimension 4
+Epoch 1/5:   0%|          | 0/23 [00:00<?, ?it/s]Epoch 1/5:   0%|          | 0/23 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/rotary.py", line 78, in apply_rotary_pos_emb
+    return flash_attn.layers.rotary.apply_rotary_emb_qkv_(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/flash_attn/layers/rotary.py", line 233, in apply_rotary_emb_qkv_
+    return ApplyRotaryEmbQKV_.apply(qkv, cos, sin, cos_k, sin_k, interleaved, seqlen_offsets)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/autograd/function.py", line 598, in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/flash_attn/layers/rotary.py", line 151, in forward
+    apply_rotary(
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/flash_attn/ops/triton/rotary.py", line 202, in apply_rotary
+    rotary_kernel[grid](
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/triton/runtime/jit.py", line 167, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/triton/runtime/jit.py", line 425, in run
+    kernel.run(grid_0, grid_1, grid_2, kernel.num_warps, kernel.num_ctas,  # number of warps/ctas per instance
+ValueError: Pointer argument (at 0) cannot be accessed from Triton (cpu tensor?)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/training/run_train_uniref_ddp_polaris.py", line 1105, in generate_protein_sequences_rigorous
+    samples = sampler(model_wrapper, task="protein_only")
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/sampling/sampling.py", line 164, in pc_sampler
+    x = predictor.update_fn(score_model=model, x=x, t=t, step_size=dt, task=task, prot_indices = prot_indices, lig_indices = lig_indices)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/sampling/sampling.py", line 72, in update_fn
+    score = score_model(
+            ^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/training/run_train_uniref_ddp_polaris.py", line 1056, in __call__
+    return model_to_use(protein_indices, timesteps)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/transformer_v100.py", line 588, in forward
+    x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/transformer_v100.py", line 427, in forward
+    qkv = rotary.apply_rotary_pos_emb(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/rotary.py", line 87, in apply_rotary_pos_emb
+    return _apply_rotary_pos_emb_native(qkv, cos, sin)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/rotary.py", line 69, in _apply_rotary_pos_emb_native
+    return (qkv * cos) + (_rotate_half(qkv) * sin)
+            ~~~~^~~~~
+RuntimeError: The size of tensor a (64) must match the size of tensor b (32) at non-singleton dimension 4
+Epoch 1/5:   0%|          | 0/23 [00:00<?, ?it/s]Epoch 1/5:   0%|          | 0/23 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/rotary.py", line 78, in apply_rotary_pos_emb
+    return flash_attn.layers.rotary.apply_rotary_emb_qkv_(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/flash_attn/layers/rotary.py", line 233, in apply_rotary_emb_qkv_
+    return ApplyRotaryEmbQKV_.apply(qkv, cos, sin, cos_k, sin_k, interleaved, seqlen_offsets)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/autograd/function.py", line 598, in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/flash_attn/layers/rotary.py", line 151, in forward
+    apply_rotary(
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/flash_attn/ops/triton/rotary.py", line 202, in apply_rotary
+    rotary_kernel[grid](
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/triton/runtime/jit.py", line 167, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/triton/runtime/jit.py", line 425, in run
+    kernel.run(grid_0, grid_1, grid_2, kernel.num_warps, kernel.num_ctas,  # number of warps/ctas per instance
+ValueError: Pointer argument (at 0) cannot be accessed from Triton (cpu tensor?)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/training/run_train_uniref_ddp_polaris.py", line 1105, in generate_protein_sequences_rigorous
+    samples = sampler(model_wrapper, task="protein_only")
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/sampling/sampling.py", line 164, in pc_sampler
+    x = predictor.update_fn(score_model=model, x=x, t=t, step_size=dt, task=task, prot_indices = prot_indices, lig_indices = lig_indices)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/sampling/sampling.py", line 72, in update_fn
+    score = score_model(
+            ^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/training/run_train_uniref_ddp_polaris.py", line 1056, in __call__
+    return model_to_use(protein_indices, timesteps)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/transformer_v100.py", line 588, in forward
+    x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/transformer_v100.py", line 427, in forward
+    qkv = rotary.apply_rotary_pos_emb(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/rotary.py", line 87, in apply_rotary_pos_emb
+    return _apply_rotary_pos_emb_native(qkv, cos, sin)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/rotary.py", line 69, in _apply_rotary_pos_emb_native
+    return (qkv * cos) + (_rotate_half(qkv) * sin)
+            ~~~~^~~~~
+RuntimeError: The size of tensor a (64) must match the size of tensor b (32) at non-singleton dimension 4
+Epoch 1/5:   0%|          | 0/23 [00:00<?, ?it/s]Epoch 1/5:   0%|          | 0/23 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/rotary.py", line 78, in apply_rotary_pos_emb
+    return flash_attn.layers.rotary.apply_rotary_emb_qkv_(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/flash_attn/layers/rotary.py", line 233, in apply_rotary_emb_qkv_
+    return ApplyRotaryEmbQKV_.apply(qkv, cos, sin, cos_k, sin_k, interleaved, seqlen_offsets)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/autograd/function.py", line 598, in apply
+    return super().apply(*args, **kwargs)  # type: ignore[misc]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/flash_attn/layers/rotary.py", line 151, in forward
+    apply_rotary(
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/flash_attn/ops/triton/rotary.py", line 202, in apply_rotary
+    rotary_kernel[grid](
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/triton/runtime/jit.py", line 167, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/triton/runtime/jit.py", line 425, in run
+    kernel.run(grid_0, grid_1, grid_2, kernel.num_warps, kernel.num_ctas,  # number of warps/ctas per instance
+ValueError: Pointer argument (at 0) cannot be accessed from Triton (cpu tensor?)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/training/run_train_uniref_ddp_polaris.py", line 1105, in generate_protein_sequences_rigorous
+    samples = sampler(model_wrapper, task="protein_only")
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 115, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/sampling/sampling.py", line 164, in pc_sampler
+    x = predictor.update_fn(score_model=model, x=x, t=t, step_size=dt, task=task, prot_indices = prot_indices, lig_indices = lig_indices)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/sampling/sampling.py", line 72, in update_fn
+    score = score_model(
+            ^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/training/run_train_uniref_ddp_polaris.py", line 1056, in __call__
+    return model_to_use(protein_indices, timesteps)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/transformer_v100.py", line 588, in forward
+    x = self.blocks[i](x, rotary_cos_sin, c, seqlens=None)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1532, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/soft/applications/conda/2024-04-29/mconda3/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1541, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/transformer_v100.py", line 427, in forward
+    qkv = rotary.apply_rotary_pos_emb(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/rotary.py", line 87, in apply_rotary_pos_emb
+    return _apply_rotary_pos_emb_native(qkv, cos, sin)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/diffusion_repo_clean/protein_lig_sedd/protlig_dd/model/rotary.py", line 69, in _apply_rotary_pos_emb_native
+    return (qkv * cos) + (_rotate_half(qkv) * sin)
+            ~~~~^~~~~
+RuntimeError: The size of tensor a (64) must match the size of tensor b (32) at non-singleton dimension 4
+Epoch 1/5:   0%|          | 0/23 [00:00<?, ?it/s]Epoch 1/5:   0%|          | 0/23 [00:00<?, ?it/s]
