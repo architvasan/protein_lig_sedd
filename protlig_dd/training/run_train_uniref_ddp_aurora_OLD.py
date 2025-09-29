@@ -1,8 +1,6 @@
 """
 Optimized training script for UniRef50 with improved stability and efficiency.
 """
-from mpi4py import MPI
-import os, socket
 import torch
 ### Import intel_extension_for_pytorch for running on aurora
 try:
@@ -26,9 +24,6 @@ import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import json
-from collections import OrderedDict
-from transformers import GPT2TokenizerFast
 import yaml
 from dataclasses import dataclass
 from typing import Optional
@@ -48,8 +43,6 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 ### Import torch.distributed for running on aurora
 import torch.distributed as dist
-import argparse
-import datetime
 
 def setup_ddp(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
@@ -58,322 +51,20 @@ def setup_ddp(rank, world_size):
     dist.init_process_group("ccl", rank=rank, world_size=world_size)
     torch.xpu.set_device(rank)
 
-def setup_ddp_polaris(rank, world_size):
-    # DDP: Set environmental variables used by PyTorch
-    SIZE = MPI.COMM_WORLD.Get_size()
-    RANK = MPI.COMM_WORLD.Get_rank()
-    LOCAL_RANK = os.environ.get('PMI_LOCAL_RANK')
-    local_rank = LOCAL_RANK
-    print(f"{RANK=}")
-    print(f"{LOCAL_RANK=}")
-    os.environ['RANK'] = str(RANK)
-    os.environ['WORLD_SIZE'] = str(SIZE)
-    MASTER_ADDR = socket.gethostname() if RANK == 0 else None
-    MASTER_ADDR = MPI.COMM_WORLD.bcast(MASTER_ADDR, root=0)
-    os.environ['MASTER_ADDR'] = MASTER_ADDR 
-    os.environ['MASTER_PORT'] = str(2345)
-    print(f"DDP: Hi from rank {RANK} of {SIZE} with local rank {LOCAL_RANK}. {MASTER_ADDR}")
-
-    # DDP: initialize distributed communication with nccl backend
-    torch.distributed.init_process_group(backend='nccl', init_method='env://', rank=int(RANK), world_size=int(SIZE))
-
-    print(f"Rank: {dist.get_rank()}, World size: {dist.get_world_size()}, Local rank: {local_rank}")
-    print(dist)
-    rank = dist.get_rank()
-    device_id = rank % torch.cuda.device_count()
-    torch.cuda.set_device(device_id)
-    print("DDPPP")
-    return dist.get_rank(), device_id, dist.get_world_size()
-
-class ProteinTokenizer:
-    """Protein tokenizer based on the download script."""
-
-    def __init__(self, vocab_file=None, merges_file=None):
-        self.amino_acids = list("ACDEFGHIKLMNPQRSTVWY")
-        self.special_tokens = ["<s>", "<pad>", "</s>", "<unk>", "<mask>"]
-
-        if vocab_file and merges_file:
-            # Load existing tokenizer
-            self.tokenizer = GPT2TokenizerFast(
-                vocab_file=vocab_file,
-                merges_file=merges_file,
-                bos_token='<s>',
-                eos_token='</s>',
-                unk_token='<unk>',
-                pad_token='<pad>',
-                mask_token='<mask>'
-            )
-        else:
-            # Create new tokenizer
-            self.tokenizer = self._create_tokenizer()
-
-    def _create_tokenizer(self):
-        """Create protein tokenizer."""
-        all_tokens = self.special_tokens + self.amino_acids
-        vocab = OrderedDict((token, idx) for idx, token in enumerate(all_tokens))
-
-        # Create temporary files
-        import tempfile
-        import os
-
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            json.dump(vocab, f)
-            vocab_file = f.name
-
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            f.write('#version: 0.2\n')
-            merges_file = f.name
-
-        tokenizer = GPT2TokenizerFast(
-            vocab_file=vocab_file,
-            merges_file=merges_file,
-            bos_token='<s>',
-            eos_token='</s>',
-            unk_token='<unk>',
-            pad_token='<pad>',
-            mask_token='<mask>'
-        )
-
-        # Clean up temp files
-        os.unlink(vocab_file)
-        os.unlink(merges_file)
-
-        return tokenizer
-
-    def tokenize_sequence(self, sequence, max_length=512):
-        """Tokenize a single protein sequence."""
-        # Truncate if needed
-        if len(sequence) > max_length - 2:
-            sequence = sequence[:max_length - 2]
-
-        # Tokenize
-        tokens = self.tokenizer.encode(sequence, add_special_tokens=True)
-
-        # Pad
-        if len(tokens) < max_length:
-            tokens.extend([self.tokenizer.pad_token_id] * (max_length - len(tokens)))
-
-        return torch.tensor(tokens, dtype=torch.long)
-
-
 class UniRef50Dataset(torch.utils.data.Dataset):
-    """Dataset class for processed UniRef50 data - supports both tokenized and untokenized data."""
+    """Dataset class for processed UniRef50 data."""
 
-    def __init__(self, data_file, tokenize_on_fly=False, max_length=512, use_streaming=False):
-        self.data_file = data_file
-        self.tokenize_on_fly = tokenize_on_fly
-        self.max_length = max_length
-        self.use_streaming = use_streaming
-
-        if use_streaming:
-            print(f"🌊 Using streaming mode for large file: {data_file}")
-            # For streaming, we need to get the length without loading all data
-            self._get_streaming_info()
-        else:
-            # Try memory mapping first for large files
-            file_size_gb = os.path.getsize(data_file) / (1024**3)
-            if file_size_gb > 50:  # If file is larger than 50GB
-                print(f"📁 Large file detected ({file_size_gb:.1f}GB). Using memory mapping...")
-                try:
-                    self.data = torch.load(data_file, weights_only=False, map_location='cpu', mmap=True)
-                except Exception as e:
-                    print(f"⚠️  Memory mapping failed: {e}")
-                    print("🌊 Falling back to streaming mode...")
-                    self.use_streaming = True
-                    self._get_streaming_info()
-                    return
-            else:
-                print(f"📁 Loading file ({file_size_gb:.1f}GB) into memory...")
-                self.data = torch.load(data_file, weights_only=False)
-
-        if not self.use_streaming:
-            self._check_tokenization_format()
-
-    def _get_streaming_info(self):
-        """Get dataset info for streaming mode without loading all data."""
-        print("🔍 Analyzing file structure for streaming...")
-
-        # Load just a small sample to understand the format
-        try:
-            # Try to load just the first few items
-            sample_data = []
-            with open(self.data_file, 'rb') as f:
-                import pickle
-                try:
-                    # Try to load incrementally
-                    for i in range(min(10, 1000)):  # Load first 10 items for analysis
-                        try:
-                            item = pickle.load(f)
-                            sample_data.append(item)
-                        except EOFError:
-                            break
-                except:
-                    # If incremental loading fails, try loading the whole thing and take a sample
-                    f.seek(0)
-                    full_data = pickle.load(f)
-                    if isinstance(full_data, list) and len(full_data) > 0:
-                        sample_data = full_data[:10]
-                        self.total_length = len(full_data)
-                        print(f"📊 Detected {self.total_length} total sequences")
-                    else:
-                        raise ValueError("Unknown data format for streaming")
-
-            if sample_data:
-                self.sample_data = sample_data
-                self._check_tokenization_format_streaming(sample_data)
-                if not hasattr(self, 'total_length'):
-                    # If we couldn't get total length, we'll need to count
-                    print("⚠️  Could not determine total length. Will count during training.")
-                    self.total_length = None
-            else:
-                raise ValueError("Could not load any sample data")
-
-        except Exception as e:
-            print(f"❌ Error setting up streaming: {e}")
-            raise ValueError(f"Cannot setup streaming for file {self.data_file}: {e}")
-
-    def _check_tokenization_format_streaming(self, sample_data):
-        """Check tokenization format for streaming mode."""
-        if len(sample_data) > 0:
-            sample = sample_data[0]
-            if isinstance(sample, dict) and 'prot_tokens' in sample:
-                self.is_tokenized = True
-                print(f"✅ Detected pre-tokenized data (streaming mode)")
-            elif isinstance(sample, dict) and ('protein_seq' in sample or 'sequence' in sample):
-                self.is_tokenized = False
-                print(f"✅ Detected untokenized data (streaming mode)")
-                if self.tokenize_on_fly:
-                    self.tokenizer = ProteinTokenizer()
-                    print("✅ Tokenizer initialized for streaming")
-            elif isinstance(sample, str):
-                self.is_tokenized = False
-                print(f"✅ Detected raw sequence strings (streaming mode)")
-                if self.tokenize_on_fly:
-                    self.tokenizer = ProteinTokenizer()
-                    print("✅ Tokenizer initialized for streaming")
-            else:
-                raise ValueError(f"Unknown data format in streaming mode: {type(sample)}")
-
-    def _check_tokenization_format(self):
-        """Check tokenization format for regular mode."""
-        # Check if data is already tokenized
-        if len(self.data) > 0:
-            sample = self.data[0]
-            if isinstance(sample, dict) and 'prot_tokens' in sample:
-                self.is_tokenized = True
-                print(f"Loaded {len(self.data)} pre-tokenized sequences from {self.data_file}")
-            elif isinstance(sample, dict) and ('protein_seq' in sample or 'sequence' in sample):
-                self.is_tokenized = False
-                print(f"Loaded {len(self.data)} untokenized sequences from {self.data_file}")
-                if self.tokenize_on_fly:
-                    self.tokenizer = ProteinTokenizer()
-                    print("✅ Tokenizer initialized for on-the-fly tokenization")
-            elif isinstance(sample, str):
-                self.is_tokenized = False
-                print(f"Loaded {len(self.data)} raw sequence strings from {self.data_file}")
-                if self.tokenize_on_fly:
-                    self.tokenizer = ProteinTokenizer()
-                    print("✅ Tokenizer initialized for on-the-fly tokenization")
-            else:
-                raise ValueError(f"Unknown data format in {self.data_file}. Expected dict with 'prot_tokens' or 'protein_seq'/'sequence', or raw strings.")
-        else:
-            raise ValueError(f"Empty dataset loaded from {self.data_file}")
+    def __init__(self, data_file):
+        self.data = torch.load(data_file, weights_only=False)
+        print(f"Loaded {len(self.data)} sequences from {data_file}")
 
     def __len__(self):
-        if self.use_streaming:
-            if self.total_length is not None:
-                return self.total_length
-            else:
-                # If we don't know the length, we need to count (expensive)
-                print("⚠️  Counting sequences in large file (this may take a while)...")
-                count = 0
-                try:
-                    with open(self.data_file, 'rb') as f:
-                        import pickle
-                        data = pickle.load(f)
-                        if isinstance(data, list):
-                            count = len(data)
-                        else:
-                            count = 1
-                    self.total_length = count
-                    return count
-                except Exception as e:
-                    print(f"❌ Error counting sequences: {e}")
-                    return 1000000  # Fallback estimate
-        else:
-            return len(self.data)
+        return len(self.data)
 
     def __getitem__(self, idx):
-        if self.use_streaming:
-            return self._get_streaming_item(idx)
-        else:
-            sample = self.data[idx]
-
-            if self.is_tokenized:
-                # Return pre-tokenized data
-                return sample['prot_tokens']
-            else:
-                # Handle untokenized data
-                if not self.tokenize_on_fly:
-                    raise ValueError("Data is not tokenized but tokenize_on_fly=False. Set tokenize_on_fly=True or use pre-tokenized data.")
-
-                # Extract sequence
-                if isinstance(sample, dict):
-                    if 'protein_seq' in sample:
-                        sequence = sample['protein_seq']
-                    elif 'sequence' in sample:
-                        sequence = sample['sequence']
-                    else:
-                        raise ValueError(f"Dict sample missing 'protein_seq' or 'sequence' key: {list(sample.keys())}")
-                elif isinstance(sample, str):
-                    sequence = sample
-                else:
-                    raise ValueError(f"Unknown sample type: {type(sample)}")
-
-                # Tokenize on the fly
-                return self.tokenizer.tokenize_sequence(sequence, self.max_length)
-
-    def _get_streaming_item(self, idx):
-        """Get item in streaming mode - loads data on demand."""
-        try:
-            # For streaming, we need to load the specific item
-            # This is a simplified implementation - for very large files,
-            # you might want to implement more sophisticated caching
-
-            if not hasattr(self, '_cached_data') or self._cached_data is None:
-                # Load the full data (this is still the bottleneck for very large files)
-                print(f"🔄 Loading data for streaming access...")
-                with open(self.data_file, 'rb') as f:
-                    import pickle
-                    self._cached_data = pickle.load(f)
-                print(f"✅ Data loaded for streaming")
-
-            sample = self._cached_data[idx]
-
-            if self.is_tokenized:
-                return sample['prot_tokens']
-            else:
-                if not self.tokenize_on_fly:
-                    raise ValueError("Data is not tokenized but tokenize_on_fly=False.")
-
-                # Extract sequence
-                if isinstance(sample, dict):
-                    if 'protein_seq' in sample:
-                        sequence = sample['protein_seq']
-                    elif 'sequence' in sample:
-                        sequence = sample['sequence']
-                    else:
-                        raise ValueError(f"Dict sample missing sequence key: {list(sample.keys())}")
-                elif isinstance(sample, str):
-                    sequence = sample
-                else:
-                    raise ValueError(f"Unknown sample type: {type(sample)}")
-
-                return self.tokenizer.tokenize_sequence(sequence, self.max_length)
-
-        except Exception as e:
-            print(f"❌ Error loading streaming item {idx}: {e}")
-            raise
+        sample = self.data[idx]
+        # Return the tokenized protein sequence
+        return sample['prot_tokens']
 
 def safe_getattr(obj, path, default=None):
     """Safely get nested attributes with default fallback."""
@@ -403,8 +94,6 @@ class OptimizedUniRef50Trainer:
     sampling_method: str = "rigorous"  # "rigorous" or "simple"
     epochs_override: Optional[int] = None  # Override epochs for hyperparameter sweeps
     use_ddp: bool = True
-    use_wandb: bool = True  # Toggle wandb logging on/off
-    minimal_mode: bool = False  # Minimal mode for large-scale DDP debugging
 
     def __post_init__(self):
         """Initialize trainer components."""
@@ -414,15 +103,10 @@ class OptimizedUniRef50Trainer:
         torch.manual_seed(self.seed)
         np.random.seed(self.seed)
 
-        if self.use_ddp:
-            self.rank, self.device, self.world_size = setup_ddp_polaris(self.rank, self.world_size)
-            #self.device = torch.device(f"cuda:{device_id}")
-        else:
-            self.device = torch.device(self.dev_id)
-        print(f"{self.rank=}")
-        print(f"{self.device=}")
+        if self.use_ddp: 
+            setup_ddp(self.rank, self.world_size)
         # Setup device with cross-platform compatibility
-        #self.device = self.setup_device(self.rank)
+        self.device = self.setup_device(self.rank)
         #print(f"✅ Using device: {self.device}")
 
         # Load configuration
@@ -439,9 +123,6 @@ class OptimizedUniRef50Trainer:
         os.makedirs(self.sample_dir, exist_ok=True)
 
         print(f"Config loaded from: {self.config_file}")
-
-        # Setup logging
-        self.setup_logging()
 
         # Initialize device-specific attributes
         device_type = str(self.device).split(':')[0]
@@ -552,14 +233,8 @@ class OptimizedUniRef50Trainer:
         """Setup data loaders for our custom processed UniRef50 data."""
         from torch.utils.data import DataLoader, random_split
 
-        # Load dataset with tokenization options
-        max_length = safe_getattr(self.cfg, 'data.max_protein_len', 512)
-        dataset = UniRef50Dataset(
-            self.datafile,
-            tokenize_on_fly=getattr(self, 'tokenize_on_fly', False),
-            max_length=max_length,
-            use_streaming=getattr(self, 'use_streaming', False)
-        )
+        # Load dataset
+        dataset = UniRef50Dataset(self.datafile)
 
         # Split into train/val
         train_ratio = safe_getattr(self.cfg, 'data.train_ratio', 0.9)
@@ -610,14 +285,8 @@ class OptimizedUniRef50Trainer:
         """Setup data loaders for our custom processed UniRef50 data."""
         from torch.utils.data import DataLoader, random_split
 
-        # Load dataset with tokenization options
-        max_length = safe_getattr(self.cfg, 'data.max_protein_len', 512)
-        dataset = UniRef50Dataset(
-            self.datafile,
-            tokenize_on_fly=getattr(self, 'tokenize_on_fly', False),
-            max_length=max_length,
-            use_streaming=getattr(self, 'use_streaming', False)
-        )
+        # Load dataset
+        dataset = UniRef50Dataset(self.datafile)
 
         # Split into train/val
         train_ratio = safe_getattr(self.cfg, 'data.train_ratio', 0.9)
@@ -641,12 +310,11 @@ class OptimizedUniRef50Trainer:
 
         self.train_sampler = DistributedSampler(
                             train_dataset,
-                            num_replicas=dist.get_world_size(),
+                            num_replicas=self.world_size,
                             rank=self.rank,
                             shuffle=True,
                             drop_last=False)
 
-        print(f"{self.train_sampler=}")
         self.train_loader = DataLoader(
                                 train_dataset,
                                 batch_size=batch_size,
@@ -702,34 +370,14 @@ class OptimizedUniRef50Trainer:
     
 
     def setup_optimizer(self):
-        """Setup optimizer with DDP-aware learning rate scaling."""
+        """Setup optimizer with improved scheduling."""
         print("Setting up optimizer...")
 
-        # Calculate DDP-scaled learning rate (most stable approach)
-        base_lr = self.cfg.optim.lr
-        if self.use_ddp and self.world_size > 1:
-            # Linear scaling with world size (most stable for DDP)
-            scaled_lr = base_lr * self.world_size
-            print(f"🔄 DDP Learning Rate Scaling:")
-            print(f"   Base LR: {base_lr:.2e}")
-            print(f"   World Size: {self.world_size}")
-            print(f"   Scaled LR: {scaled_lr:.2e} (linear scaling)")
-        else:
-            scaled_lr = base_lr
-            print(f"📊 Single GPU Learning Rate: {scaled_lr:.2e}")
-
-        # Temporarily modify config for optimizer creation
-        original_lr = self.cfg.optim.lr
-        self.cfg.optim.lr = scaled_lr
-
-        # Get optimizer with scaled learning rate
+        # Get optimizer
         self.optimizer = losses.get_optimizer(
             self.cfg,
             chain(self.model.parameters(), self.noise.parameters())
         )
-
-        # Restore original config
-        self.cfg.optim.lr = original_lr
 
         # Apply IPEX optimization for Intel XPU
         device_type = str(self.device).split(':')[0]
@@ -741,7 +389,6 @@ class OptimizedUniRef50Trainer:
             self.use_amp = True
             print("✅ Using XPU mixed precision training with IPEX optimization")
         elif device_type == 'cuda':
-            self.model.to(self.device)
             self.scaler = torch.cuda.amp.GradScaler()
             self.use_amp = True
             print("✅ Using CUDA mixed precision training")
@@ -750,17 +397,15 @@ class OptimizedUniRef50Trainer:
             self.use_amp = False
             print(f"✅ Using {device_type.upper()} without mixed precision")
         
-        # Setup learning rate scheduler with scaled learning rate
+        # Setup learning rate scheduler
         self.scheduler = WarmupCosineLR(
             self.optimizer,
             warmup_steps=self.cfg.optim.warmup,
             max_steps=self.cfg.training.n_iters,
-            base_lr=scaled_lr * 0.1,
-            max_lr=scaled_lr,
-            min_lr=scaled_lr * 0.01
+            base_lr=self.cfg.optim.lr * 0.1,
+            max_lr=self.cfg.optim.lr,
+            min_lr=self.cfg.optim.lr * 0.01
         )
-
-        print(f"✅ Scheduler configured with scaled LR: max={scaled_lr:.2e}, warmup_steps={self.cfg.optim.warmup}")
         
         # Training state
         self.state = {
@@ -776,164 +421,93 @@ class OptimizedUniRef50Trainer:
         
         print("Optimizer ready.")
 
-    def setup_logging(self):
-        """Setup logging system - either wandb or file logging."""
-        if self.use_wandb:
-            print("📊 Wandb logging enabled")
-        else:
-            # Setup file logging
-            log_dir = os.path.join(self.work_dir, "logs")
-            os.makedirs(log_dir, exist_ok=True)
-
-            # Create log file with timestamp and rank
-            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-            if self.use_ddp:
-                log_filename = f"training_rank{self.rank}_{timestamp}.log"
-            else:
-                log_filename = f"training_{timestamp}.log"
-
-            self.log_file = os.path.join(log_dir, log_filename)
-
-            # Write header
-            with open(self.log_file, 'w') as f:
-                f.write(f"# Training Log - Started {timestamp}\n")
-                f.write(f"# Rank: {self.rank if self.use_ddp else 0}\n")
-                f.write(f"# Device: {self.device}\n")
-                f.write(f"# World Size: {self.world_size if self.use_ddp else 1}\n")
-                f.write("# Format: step,epoch,loss,lr,time\n")
-
-            print(f"📝 File logging enabled: {self.log_file}")
-
-    def log_metrics(self, metrics, step=None):
-        """Log metrics to wandb or file - ALL RANKS log everything."""
-        # Skip logging in minimal mode to prevent sync issues
-        if self.minimal_mode:
-            return
-
-        # ALL ranks log everything to prevent sync issues
-        if self.use_wandb:
-            wandb.log(metrics, step=step)
-        else:
-            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            with open(self.log_file, 'a') as f:
-                # Write metrics in a structured format
-                metric_str = f"{timestamp}"
-                if step is not None:
-                    metric_str += f",step={step}"
-                for key, value in metrics.items():
-                    if isinstance(value, (int, float)):
-                        metric_str += f",{key}={value:.6f}"
-                    else:
-                        metric_str += f",{key}={value}"
-                f.write(metric_str + "\n")
-
     def wrap_model_ddp(self):
-        if self.use_ddp:
-            # Get the local device ID (not the global rank)
-            local_device_id = self.device #int(str(self.device).split(':')[1])
-            self.model_ddp = DDP(
-                                self.model,
-                                device_ids=[local_device_id],
-                                output_device=local_device_id,
-                                find_unused_parameters=False)
-            print(f"✅ Model wrapped with DDP on device {local_device_id}")
-        else:
-            self.model_ddp = self.model
-            print("✅ Using model without DDP wrapper")
+        self.model_ddp = DDP(
+                            self.model,
+                            device_ids=[self.rank],
+                            output_device=self.rank,
+                            find_unused_parameters=True)
 
     def setup_wandb(self, project_name: str, run_name: str):
         """Setup Wandb with comprehensive logging configuration."""
-        if not self.use_wandb:
-            print("📝 Wandb disabled - using file logging instead")
-            return
-
         print("🚀 Setting up Wandb logging...")
 
-        # Initialize wandb only on rank 0
-        if True:#self.rank == 0:
-            run = wandb.init(
-                project=project_name,
-                name=run_name,
-                config={
-                    # Model configuration
-                    'model_name': safe_getattr(self.cfg, 'model.name', 'transformer'),
-                    'model_type': safe_getattr(self.cfg, 'model.type', 'ddit'),
-                    'hidden_size': safe_getattr(self.cfg, 'model.hidden_size', 512),
-                    'n_blocks': safe_getattr(self.cfg, 'model.n_blocks', 8),
-                    'n_heads': safe_getattr(self.cfg, 'model.n_heads', 8),
-                    'dropout': safe_getattr(self.cfg, 'model.dropout', 0.1),
+        # Initialize wandb
+        run = wandb.init(
+            project=project_name,
+            name=run_name,
+            config={
+                # Model configuration
+                'model_name': safe_getattr(self.cfg, 'model.name', 'transformer'),
+                'model_type': safe_getattr(self.cfg, 'model.type', 'ddit'),
+                'hidden_size': safe_getattr(self.cfg, 'model.hidden_size', 512),
+                'n_blocks': safe_getattr(self.cfg, 'model.n_blocks', 8),
+                'n_heads': safe_getattr(self.cfg, 'model.n_heads', 8),
+                'dropout': safe_getattr(self.cfg, 'model.dropout', 0.1),
 
-                    # Training configuration
-                    'batch_size': safe_getattr(self.cfg, 'training.batch_size', 16),
-                    'accumulation_steps': safe_getattr(self.cfg, 'training.accum', 2),
-                    'base_learning_rate': safe_getattr(self.cfg, 'optim.lr', 5e-5),
-                    'effective_learning_rate': safe_getattr(self.cfg, 'optim.lr', 5e-5) * (self.world_size if self.use_ddp else 1),
-                    'world_size': self.world_size if self.use_ddp else 1,
-                    'weight_decay': safe_getattr(self.cfg, 'optim.weight_decay', 0.01),
-                    'warmup_steps': safe_getattr(self.cfg, 'optim.warmup', 1000),
-                    'max_iterations': safe_getattr(self.cfg, 'training.n_iters', 5000),
-                    'ema_decay': safe_getattr(self.cfg, 'training.ema', 0.999),
+                # Training configuration
+                'batch_size': safe_getattr(self.cfg, 'training.batch_size', 16),
+                'accumulation_steps': safe_getattr(self.cfg, 'training.accum', 2),
+                'learning_rate': safe_getattr(self.cfg, 'optim.lr', 5e-5),
+                'weight_decay': safe_getattr(self.cfg, 'optim.weight_decay', 0.01),
+                'warmup_steps': safe_getattr(self.cfg, 'optim.warmup', 1000),
+                'max_iterations': safe_getattr(self.cfg, 'training.n_iters', 5000),
+                'ema_decay': safe_getattr(self.cfg, 'training.ema', 0.999),
 
-                    # Data configuration
-                    'max_protein_len': safe_getattr(self.cfg, 'data.max_protein_len', 512),
-                    'vocab_size': safe_getattr(self.cfg, 'data.vocab_size_protein', 25),
-                    'train_ratio': safe_getattr(self.cfg, 'data.train_ratio', 0.9),
+                # Data configuration
+                'max_protein_len': safe_getattr(self.cfg, 'data.max_protein_len', 512),
+                'vocab_size': safe_getattr(self.cfg, 'data.vocab_size_protein', 25),
+                'train_ratio': safe_getattr(self.cfg, 'data.train_ratio', 0.9),
 
-                    # Noise configuration
-                    'noise_type': safe_getattr(self.cfg, 'noise.type', 'cosine'),
-                    'sigma_min': safe_getattr(self.cfg, 'noise.sigma_min', 1e-4),
-                    'sigma_max': safe_getattr(self.cfg, 'noise.sigma_max', 0.5),
+                # Noise configuration
+                'noise_type': safe_getattr(self.cfg, 'noise.type', 'cosine'),
+                'sigma_min': safe_getattr(self.cfg, 'noise.sigma_min', 1e-4),
+                'sigma_max': safe_getattr(self.cfg, 'noise.sigma_max', 0.5),
 
-                    # Curriculum learning
-                    'curriculum_enabled': safe_getattr(self.cfg, 'curriculum.enabled', False),
-                    'preschool_time': safe_getattr(self.cfg, 'curriculum.preschool_time', 5000),
+                # Curriculum learning
+                'curriculum_enabled': safe_getattr(self.cfg, 'curriculum.enabled', False),
+                'preschool_time': safe_getattr(self.cfg, 'curriculum.preschool_time', 5000),
 
-                    # System info
-                    'device': str(self.device),
-                    'seed': safe_getattr(self.cfg, 'training.seed', 42),
-                    'epochs': self.epochs_override if self.epochs_override is not None else safe_getattr(self.cfg, 'training.epochs', 50),
+                # System info
+                'device': str(self.device),
+                'seed': safe_getattr(self.cfg, 'training.seed', 42),
+                'epochs': self.epochs_override if self.epochs_override is not None else safe_getattr(self.cfg, 'training.epochs', 50),
             },
             tags=['uniref50', 'sedd', 'protein', 'diffusion', 'optimized'],
             notes=f"Optimized UniRef50 training with improved V100-compatible attention and enhanced curriculum learning"
         )
 
-            # Display the Wandb web interface link prominently
-            print("\n" + "="*80)
-            print("🌐 WANDB EXPERIMENT TRACKING")
-            print("="*80)
-            print(f"📊 Project: {project_name}")
-            print(f"🏷️  Run Name: {run_name}")
-            print(f"🔗 Web Interface: {wandb.run.url}")
-            print(f"📈 Dashboard: https://wandb.ai/{wandb.run.entity}/{wandb.run.project}")
-            print("="*80)
-            print("💡 Open the link above to monitor your training in real-time!")
-            print("="*80 + "\n")
+        # Display the Wandb web interface link prominently
+        print("\n" + "="*80)
+        print("🌐 WANDB EXPERIMENT TRACKING")
+        print("="*80)
+        print(f"📊 Project: {project_name}")
+        print(f"🏷️  Run Name: {run_name}")
+        print(f"🔗 Web Interface: {wandb.run.url}")
+        print(f"📈 Dashboard: https://wandb.ai/{wandb.run.entity}/{wandb.run.project}")
+        print("="*80)
+        print("💡 Open the link above to monitor your training in real-time!")
+        print("="*80 + "\n")
 
-            # Store the run for later reference
-            self.wandb_run = run
+        # Store the run for later reference
+        self.wandb_run = run
 
-            print("✅ Wandb setup complete - tracking enabled!")
+        print("✅ Wandb setup complete - tracking enabled!")
 
     def setup_wandb_model_watching(self):
         """Setup model watching after model is created."""
-        if not self.use_wandb:
-            return
-
         try:
-            if self.rank == 0:  # Keep this rank check for wandb.watch
-                # Watch model for gradient and parameter tracking
-                log_freq = safe_getattr(self.cfg, 'training.log_freq', 50)
-                wandb.watch(self.model, log='all', log_freq=log_freq)
-                print("✅ Wandb model watching enabled")
+            # Watch model for gradient and parameter tracking
+            log_freq = safe_getattr(self.cfg, 'training.log_freq', 50)
+            wandb.watch(self.model, log='all', log_freq=log_freq)
+            print("✅ Wandb model watching enabled")
         except Exception as e:
             print(f"⚠️  Warning: Could not setup model watching: {e}")
             print("   Training will continue without gradient tracking")
 
     def log_training_metrics(self, step: int, loss: float, lr: float, epoch: int,
                            batch_time: float = None, additional_metrics: dict = None):
-        """Log training metrics - ALL RANKS participate."""
-        # All ranks participate in logging computation
-
+        """Log training metrics to Wandb."""
         metrics = {
             'train/loss': loss,
             'train/learning_rate': lr,
@@ -949,17 +523,10 @@ class OptimizedUniRef50Trainer:
             for key, value in additional_metrics.items():
                 metrics[f'train/{key}'] = value
 
-        self.log_metrics(metrics, step=step)
-
-    def log_to_wandb(self, metrics: dict, step: int = None):
-        """Helper method to log to wandb or file - ALL RANKS log."""
-        # All ranks log to prevent sync issues
-        self.log_metrics(metrics, step=step)
+        wandb.log(metrics, step=step)
 
     def log_validation_metrics(self, step: int, val_loss: float, perplexity: float = None, recon_loss: float = None):
-        """Log validation metrics - ALL RANKS log."""
-        # All ranks log to prevent sync issues
-
+        """Log validation metrics to Wandb."""
         metrics = {
             'val/loss': val_loss,
             'val/step': step,
@@ -1050,10 +617,8 @@ class OptimizedUniRef50Trainer:
 
                             # UniRef50 model expects (indices, sigma) format
                             # Use protein_indices as the main input for protein_only mode
-                            # Use DDP model if available
-                            model_to_use = self.model_ddp if hasattr(self, 'model_ddp') and self.use_ddp else self.model
                             if mode == 'protein_only':
-                                return model_to_use(protein_indices, timesteps)
+                                return self.model(protein_indices, timesteps)
                             else:
                                 raise ValueError(f"UniRef50 model only supports protein_only mode, got {mode}")
 
@@ -1064,9 +629,8 @@ class OptimizedUniRef50Trainer:
                                 timesteps = sigma
                             else:
                                 timesteps = sigma * torch.ones(x.shape[0], device=x.device)
-                            # Call the model with proper interface (use DDP model if available)
-                            model_to_use = self.model_ddp if hasattr(self, 'model_ddp') and self.use_ddp else self.model
-                            return model_to_use(x, timesteps)
+                            # Call the model with proper interface
+                            return self.model(x, timesteps)
                         else:
                             raise ValueError(f"ModelWrapper called with invalid arguments. Got x={x}, sigma={sigma}, kwargs={list(kwargs.keys())}")
 
@@ -1116,7 +680,7 @@ class OptimizedUniRef50Trainer:
 
                         generated_sequences.append({
                             'sample_id': i,
-                            'raw_tokens': sample_tokens.cpu().tolist(),
+                            'raw_tokens': sample_tokens[:50].cpu().tolist(),
                             'sequence': decoded_sequence,
                             'length': len(decoded_sequence),
                             'unique_amino_acids': len(set(decoded_sequence)) if decoded_sequence else 0
@@ -1168,17 +732,16 @@ class OptimizedUniRef50Trainer:
                         # Compute timestep (from 1.0 to 0.0)
                         t = torch.tensor([1.0 - step / num_diffusion_steps], device=self.device)
 
-                        # Get model predictions (use DDP model)
-                        model_to_use = self.model_ddp if self.use_ddp else self.model
+                        # Get model predictions
                         device_type = str(self.device).split(':')[0]
                         if device_type == 'xpu':
                             with torch.xpu.amp.autocast(enabled=False):
-                                logits = model_to_use(sample, t)
+                                logits = self.model(sample, t)
                         elif device_type == 'cuda':
                             with torch.cuda.amp.autocast(enabled=False):
-                                logits = model_to_use(sample, t)
+                                logits = self.model(sample, t)
                         else:
-                            logits = model_to_use(sample, t)
+                            logits = self.model(sample, t)
 
                         # Temperature sampling
                         probs = torch.softmax(logits / temperature, dim=-1)
@@ -1198,7 +761,7 @@ class OptimizedUniRef50Trainer:
 
                     generated_sequences.append({
                         'sample_id': i,
-                        'raw_tokens': sample[0].cpu().tolist(),  # First 50 tokens for debugging
+                        'raw_tokens': sample[0][:50].cpu().tolist(),  # First 50 tokens for debugging
                         'sequence': decoded_sequence,
                         'length': len(decoded_sequence),
                         'unique_amino_acids': len(set(decoded_sequence)) if decoded_sequence else 0
@@ -1235,10 +798,8 @@ class OptimizedUniRef50Trainer:
         else:
             raise ValueError(f"Unknown sampling method: {sampling_method}. Use 'rigorous' or 'simple'.")
 
-    def quick_generation_test(self, step: int, epoch: int, num_samples: int = 10, max_length: int = 128):
-        """Quick generation test during training to monitor generation quality - ALL RANKS participate."""
-        # All ranks participate to prevent sync issues
-
+    def quick_generation_test(self, step: int, epoch: int, num_samples: int = 3, max_length: int = 128):
+        """Quick generation test during training to monitor generation quality."""
         # Use same max length as training data if not specified
         if max_length is None:
             max_length = safe_getattr(self.cfg, 'data.max_protein_len', 512)
@@ -1318,8 +879,8 @@ class OptimizedUniRef50Trainer:
                     sampling_method=self.sampling_method
                 )
 
-                # Log to wandb (rank 0 only)
-                self.log_to_wandb({
+                # Log to wandb
+                wandb.log({
                     'quick_gen/samples': quick_gen_table,
                     'quick_gen/valid_sequences': valid_count,
                     'quick_gen/total_sequences': num_samples,
@@ -1334,7 +895,7 @@ class OptimizedUniRef50Trainer:
                 return True
             else:
                 print(f"   ⚠️  No valid sequences generated ({num_samples} attempted)")
-                self.log_to_wandb({
+                wandb.log({
                     'quick_gen/valid_sequences': 0,
                     'quick_gen/total_sequences': num_samples,
                     'quick_gen/success_rate': 0.0,
@@ -1345,7 +906,7 @@ class OptimizedUniRef50Trainer:
 
         except Exception as e:
             print(f"   ❌ Quick generation test failed: {e}")
-            self.log_to_wandb({
+            wandb.log({
                 'quick_gen/error': str(e),
                 'quick_gen/sampling_method': self.sampling_method
             }, step=step)
@@ -1514,9 +1075,7 @@ class OptimizedUniRef50Trainer:
         return properties
 
     def comprehensive_evaluation(self, step: int, epoch: int, num_samples: int = 15, sampling_method: str = "rigorous"):
-        """Comprehensive evaluation including generation quality assessment - ALL RANKS participate."""
-        # All ranks participate to prevent sync issues
-
+        """Comprehensive evaluation including generation quality assessment."""
         print(f"\n🔬 COMPREHENSIVE EVALUATION - Step {step}, Epoch {epoch}")
         print("=" * 80)
 
@@ -1524,10 +1083,6 @@ class OptimizedUniRef50Trainer:
             # 1. Validation loss
             print("📊 Computing validation loss...")
             val_loss, recon_loss, fixed_noise_metrics = self.validate_model()
-            print(f"   Validation Loss: {val_loss:.4f}"
-                  f"   Reconstruction Loss: {recon_loss:.4f}" if recon_loss is not None else ""
-                  f"   Fixed Noise Metrics: {fixed_noise_metrics}" if fixed_noise_metrics else "" 
-                )
 
             # 2. Generate sequences using specified method
             print(f"🧬 Generating protein sequences using {sampling_method} method...")
@@ -1550,7 +1105,7 @@ class OptimizedUniRef50Trainer:
                 )
 
             # Log sampling method used
-            self.log_to_wandb({
+            wandb.log({
                 'eval/sampling_method': sampling_method,
                 'eval/num_generated_samples': len(generated_sequences)
             }, step=step)
@@ -1623,7 +1178,7 @@ class OptimizedUniRef50Trainer:
                     wandb_metrics[f'training_data/{key}'] = value
 
             # Log to Wandb
-            self.log_to_wandb(wandb_metrics, step=step)
+            wandb.log(wandb_metrics, step=step)
 
             # 6. Create and log sample table with full sequences and ESM perplexity
             if generated_sequences:
@@ -1645,7 +1200,7 @@ class OptimizedUniRef50Trainer:
                     data=sample_data
                 )
 
-                self.log_to_wandb({
+                wandb.log({
                     'samples/generated_proteins': sample_table,
                     'samples/step': step
                 }, step=step)
@@ -1835,7 +1390,7 @@ class OptimizedUniRef50Trainer:
             xpu_memory_allocated = torch.xpu.memory_allocated() / 1024**3  # GB
             xpu_memory_reserved = torch.xpu.memory_reserved() / 1024**3   # GB
 
-            self.log_to_wandb({
+            wandb.log({
                 'system/xpu_memory_allocated_gb': xpu_memory_allocated,
                 'system/xpu_memory_reserved_gb': xpu_memory_reserved,
                 'system/step': step
@@ -1844,7 +1399,7 @@ class OptimizedUniRef50Trainer:
             gpu_memory_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
             gpu_memory_reserved = torch.cuda.memory_reserved() / 1024**3   # GB
 
-            self.log_to_wandb({
+            wandb.log({
                 'system/gpu_memory_allocated_gb': gpu_memory_allocated,
                 'system/gpu_memory_reserved_gb': gpu_memory_reserved,
                 'system/step': step
@@ -1872,38 +1427,12 @@ class OptimizedUniRef50Trainer:
             else:
                 raise ValueError(f"Batch must be at least 2D, got {batch.dim()}D with shape {batch.shape}")
 
-        # Sample timesteps with optional probabilistic curriculum
-        if (hasattr(self.cfg, 'curriculum') and self.cfg.curriculum.enabled and
-            hasattr(self.cfg.curriculum, 'probabilistic') and self.cfg.curriculum.probabilistic):
-            # Use probabilistic curriculum: bias timestep sampling toward lower noise early in training
-            from protlig_dd.processing.noise_lib import sample_timesteps_curriculum
-            t = sample_timesteps_curriculum(
-                batch_size=batch.shape[0],
-                device=self.device,
-                training_step=self.state['step'],
-                preschool_time=getattr(self.cfg.curriculum, 'preschool_time', 5000),
-                curriculum_type=getattr(self.cfg.curriculum, 'difficulty_ramp', 'exponential'),
-                bias_strength=getattr(self.cfg.curriculum, 'bias_strength', 2.0)
-            )
-            if self.state['step'] % 100 == 0:
-                from protlig_dd.processing.noise_lib import get_curriculum_stats
-                stats = get_curriculum_stats(t, self.state['step'],
-                                           getattr(self.cfg.curriculum, 'preschool_time', 5000))
-                print(f"📊 Probabilistic curriculum: step={self.state['step']}, "
-                      f"progress={stats['curriculum_progress']:.2f}, "
-                      f"avg_t={stats['mean_timestep']:.3f}, "
-                      f"low_noise%={stats['low_noise_fraction']*100:.1f}, "
-                      f"high_noise%={stats['high_noise_fraction']*100:.1f}")
-        else:
-            # Standard uniform timestep sampling
-            t = torch.rand(batch.shape[0], device=self.device) * (1 - 1e-3) + 1e-3
-
+        # Sample timesteps
+        t = torch.rand(batch.shape[0], device=self.device) * (1 - 1e-3) + 1e-3
         sigma, dsigma = self.noise(t)
         
-        # Apply curriculum learning (sigma scaling approach)
-        if (hasattr(self.cfg, 'curriculum') and self.cfg.curriculum.enabled and
-            not getattr(self.cfg.curriculum, 'probabilistic', False)):
-            # Use sigma scaling curriculum (original approach)
+        # Apply curriculum learning
+        if hasattr(self.cfg, 'curriculum') and self.cfg.curriculum.enabled:
             perturbed_batch = self.graph.sample_transition_curriculum(
                 batch,
                 sigma,  # Fixed: removed [:, None] as graph functions handle broadcasting internally
@@ -1912,7 +1441,6 @@ class OptimizedUniRef50Trainer:
                 curriculum_type=getattr(self.cfg.curriculum, 'difficulty_ramp', 'exponential')
             )
         else:
-            # Use standard transition (either no curriculum or probabilistic curriculum already applied)
             perturbed_batch = self.graph.sample_transition(batch, sigma)  # Fixed: removed [:, None]
 
         # Validate perturbed_batch is 2D: [batch_size, sequence_length]
@@ -1922,25 +1450,20 @@ class OptimizedUniRef50Trainer:
         # Forward pass with device-aware autocast and shape validation
         try:
             device_type = str(self.device).split(':')[0]
-            # Use DDP model for training
-            model_to_use = self.model_ddp if self.use_ddp else self.model
-
             if self.use_amp and device_type == 'xpu':
                 with torch.xpu.amp.autocast():
-                    log_score = model_to_use(perturbed_batch, sigma)
+                    log_score = self.model(perturbed_batch, sigma)
                     loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
             elif self.use_amp and device_type == 'cuda':
                 with torch.cuda.amp.autocast():
-                    sigma_expanded = sigma[:, None].expand(-1, batch.shape[1])
-
-                    log_score = model_to_use(perturbed_batch, sigma)
-                    loss = self.graph.score_entropy(log_score, sigma_expanded, perturbed_batch, batch)#sigma[:, None]
+                    log_score = self.model(perturbed_batch, sigma)
+                    loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
 
                     # Weight by dsigma for better training dynamics
                     loss = (dsigma[:, None] * loss).mean()
             else:
                 # No autocast for CPU/MPS
-                log_score = model_to_use(perturbed_batch, sigma)
+                log_score = self.model(perturbed_batch, sigma)
                 loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
 
                 # Weight by dsigma for better training dynamics
@@ -1958,21 +1481,20 @@ class OptimizedUniRef50Trainer:
                     perturbed_batch = perturbed_batch.view(perturbed_batch.shape[0], -1)
                     print(f"   Fixed shape: {perturbed_batch.shape}")
 
-                    # Retry the forward pass with DDP model
-                    model_to_use = self.model_ddp if self.use_ddp else self.model
+                    # Retry the forward pass
                     device_type = str(self.device).split(':')[0]
                     if self.use_amp and device_type == 'xpu':
                         with torch.xpu.amp.autocast():
-                            log_score = model_to_use(perturbed_batch, sigma)
+                            log_score = self.model(perturbed_batch, sigma)
                             loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
                             loss = (dsigma[:, None] * loss).mean()
                     elif self.use_amp and device_type == 'cuda':
                         with torch.cuda.amp.autocast():
-                            log_score = model_to_use(perturbed_batch, sigma)
+                            log_score = self.model(perturbed_batch, sigma)
                             loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
                             loss = (dsigma[:, None] * loss).mean()
                     else:
-                        log_score = model_to_use(perturbed_batch, sigma)
+                        log_score = self.model(perturbed_batch, sigma)
                         loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
                         loss = (dsigma[:, None] * loss).mean()
                 else:
@@ -1998,17 +1520,10 @@ class OptimizedUniRef50Trainer:
             batch = batch.view(batch.shape[0], -1)
             print(f"Reshaped batch to: {batch.shape}")
 
-        # Compute loss with DDP-aware accumulation
-        if self.use_ddp:
-            # For DDP, disable gradient accumulation to avoid sync issues
-            loss = self.compute_loss(batch) / self.cfg.training.accum
-            effective_accum = self.cfg.training.accum
-        else:
-            loss = self.compute_loss(batch) / self.cfg.training.accum
-            effective_accum = self.cfg.training.accum
+        # Compute loss
+        loss = self.compute_loss(batch) / self.cfg.training.accum
 
         # Backward pass with device-aware gradient scaling
-        # Note: For DDP, we disabled gradient accumulation to avoid sync issues
         if self.scaler is not None:
             self.scaler.scale(loss).backward()
         else:
@@ -2017,14 +1532,8 @@ class OptimizedUniRef50Trainer:
         # Additional metrics for logging
         additional_metrics = {}
 
-        # Update every accum steps (simplified for DDP)
-        if self.use_ddp:
-            # For DDP: update every step to avoid sync issues
-            should_update = (self.state['step'] + 1) % self.cfg.training.accum == 0
-        else:
-            should_update = (self.state['step'] + 1) % self.cfg.training.accum == 0
-
-        if should_update:
+        # Update every accum steps
+        if (self.state['step'] + 1) % self.cfg.training.accum == 0:
             # Unscale gradients for clipping (CUDA only)
             if self.scaler is not None:
                 self.scaler.unscale_(self.optimizer)
@@ -2061,42 +1570,25 @@ class OptimizedUniRef50Trainer:
 
         step_time = time.time() - step_start_time
 
-        return loss.item() * effective_accum, step_time, additional_metrics
+        return loss.item() * self.cfg.training.accum, step_time, additional_metrics
 
     def eval_reconstruction_loss(self, batch):
-        """Evaluate model at very low timestep - approximates reconstruction task."""
+        """Evaluate model at t=0 (no noise) - pure reconstruction task using proper score entropy."""
         try:
-            print("calculating recon loss")
-            # Use small timestep that gives meaningful dsigma (above noise minimum)
-            # This approximates the reconstruction task while keeping score_entropy meaningful
-            t = torch.full((batch.shape[0],), 0.05, device=self.device)
+            # Set sigma=0 (no noise condition)
+            sigma = torch.zeros(batch.shape[0], device=self.device)
 
-            # Get sigma and dsigma from noise scheduler (proper way)
-            sigma, dsigma = self.noise(t)
-
-            # Debug print to see what we're getting
-            print(f"Reconstruction: t={t[0]:.6f}, sigma={sigma.mean():.6f}, dsigma={dsigma.mean():.6f}")
-
-            # Forward pass with minimal noise - get score (use DDP model for evaluation too)
-            model_to_use = self.model_ddp if self.use_ddp else self.model
-            score = model_to_use(batch, sigma)
+            # Forward pass with no noise - get score
+            score = self.model(batch, sigma)
 
             # Use the graph's score_entropy method for proper loss computation
-            # Expand sigma to match sequence dimension if needed
-            if len(sigma.shape) == 1 and len(batch.shape) == 2:
-                sigma_expanded = sigma[:, None].expand(-1, batch.shape[1])
-            else:
-                sigma_expanded = sigma
+            # For reconstruction: x (noisy) = x0 (clean) since sigma=0
+            entropy = self.graph.score_entropy(score, sigma, batch, batch)
 
-            entropy = self.graph.score_entropy(score, sigma_expanded, batch, batch)
+            # Return mean entropy as reconstruction loss
+            recon_loss = entropy.mean()
 
-            # Weight by dsigma similar to training loss for consistency
-            weighted_entropy = (dsigma[:, None] * entropy).mean()
-
-            # Debug print to see final values
-            print(f"Reconstruction: entropy_mean={entropy.mean():.6f}, weighted_entropy={weighted_entropy:.6f}")
-
-            return weighted_entropy.item()
+            return recon_loss.item()
 
         except Exception as e:
             print(f"Warning: Could not compute reconstruction loss: {e}")
@@ -2106,38 +1598,26 @@ class OptimizedUniRef50Trainer:
         """Evaluate at specific noise levels regardless of curriculum using proper score entropy."""
         try:
             results = {}
-            # Fixed timesteps to always test (independent of curriculum)
-            # These correspond to different points in the diffusion process
-            fixed_timesteps = [0.1, 0.3, 0.5, 0.7, 0.9]
+            # Fixed noise levels to always test (independent of curriculum)
+            fixed_levels = [0.1, 0.3, 0.5, 0.7, 0.9]
 
-            for timestep in fixed_timesteps:
-                # Use noise scheduler to get sigma and dsigma for this timestep
-                t = torch.full((batch.shape[0],), timestep, device=self.device)
-                sigma, dsigma = self.noise(t)
+            for noise_level in fixed_levels:
+                # Create sigma tensor for this noise level
+                sigma = torch.full((batch.shape[0],), noise_level, device=self.device)
 
-                # Sample noisy version at this noise level using sample_transition
-                x_noisy = self.graph.sample_transition(batch, sigma)
+                # Sample noisy version at this noise level
+                x_noisy = self.graph.sample(batch, sigma)
 
-                # Forward pass at this specific noise level - get score (use DDP model)
-                model_to_use = self.model_ddp if self.use_ddp else self.model
-                score = model_to_use(x_noisy, sigma)
+                # Forward pass at this specific noise level - get score
+                score = self.model(x_noisy, sigma)
 
                 # Use proper score entropy for loss computation
-                # Expand sigma to match sequence dimension if needed
-                if len(sigma.shape) == 1 and len(batch.shape) == 2:
-                    sigma_expanded = sigma[:, None].expand(-1, batch.shape[1])
-                else:
-                    sigma_expanded = sigma
+                entropy = self.graph.score_entropy(score, sigma, x_noisy, batch)
 
-                entropy = self.graph.score_entropy(score, sigma_expanded, x_noisy, batch)
+                # Mean entropy as loss
+                loss = entropy.mean()
 
-                # Weight by dsigma like training loss for proper comparison
-                weighted_loss = (dsigma[:, None] * entropy).mean()
-
-                # Debug print
-                print(f"Timestep {timestep}: sigma = {sigma.mean():.3f}, dsigma = {dsigma.mean():.3f}, entropy = {entropy.mean():.4f}, weighted_loss = {weighted_loss:.4f}")
-
-                results[f'fixed_timestep_{timestep}'] = weighted_loss.item()
+                results[f'fixed_noise_{noise_level}'] = loss.item()
 
             return results
 
@@ -2168,9 +1648,8 @@ class OptimizedUniRef50Trainer:
                     t = torch.rand(batch.shape[0], device=self.device)
                     sigma = self.noise(t)[0]
 
-                    # Forward pass (use DDP model)
-                    model_to_use = self.model_ddp if self.use_ddp else self.model
-                    logits = model_to_use(batch, sigma)
+                    # Forward pass
+                    logits = self.model(batch, sigma)
 
                     # Simple cross-entropy loss
                     loss = F.cross_entropy(
@@ -2195,7 +1674,6 @@ class OptimizedUniRef50Trainer:
 
         self.model.train()
 
-        print(recon_losses)
         # Average all metrics
         avg_val_loss = np.mean(val_losses) if val_losses else float('inf')
         avg_recon_loss = np.mean(recon_losses) if recon_losses else None
@@ -2230,24 +1708,7 @@ class OptimizedUniRef50Trainer:
             torch.save(checkpoint, best_path)
         
         print(f"Checkpoint saved: {checkpoint_path}")
-
-    def cleanup_ddp(self):
-        """Clean up DDP process group safely."""
-        if self.use_ddp and torch.distributed.is_initialized():
-            print("🔄 Cleaning up DDP process group...")
-            try:
-                # Try barrier with timeout, but don't fail if it times out
-                torch.distributed.barrier(timeout=30)  # 30 second timeout
-                print("✅ Final barrier completed")
-            except Exception as e:
-                print(f"⚠️  Final barrier failed (continuing cleanup): {e}")
-
-            try:
-                torch.distributed.destroy_process_group()
-                print("✅ DDP process group destroyed")
-            except Exception as e:
-                print(f"⚠️  DDP cleanup failed: {e}")
-
+    
     def train(self, wandb_project: str, wandb_name: str):
         """Main training loop with comprehensive Wandb logging."""
         print("Starting training...")
@@ -2274,31 +1735,27 @@ class OptimizedUniRef50Trainer:
         checkpoint_path = os.path.join(self.checkpoint_dir, 'best_checkpoint.pth')
         if self.resume_checkpoint:
             checkpoint_path = self.resume_checkpoint
-            print(f"{checkpoint_path=}")
+
         if not self.force_fresh_start and os.path.exists(checkpoint_path):
             print(f"📂 Found existing checkpoint: {checkpoint_path}")
-            if True: #try:
-                checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-                print(f"Loaded checkpoint: {checkpoint}")
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+
                 # Load model state
                 self.model.load_state_dict(checkpoint['model_state_dict'])
-                print(f"Loaded model state_dict")
-                
+
                 # Load optimizer state
                 if 'optimizer_state_dict' in checkpoint:
                     self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                    print(f"Loaded optimizer state dict")
 
                 # Load scheduler state
                 if 'scheduler_state_dict' in checkpoint:
                     self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                    print("Loaded scheduler state dict")
 
                 # Load training state
                 step = checkpoint.get('step', 0)
                 start_epoch = checkpoint.get('epoch', 0)
                 best_loss = checkpoint.get('best_loss', float('inf'))
-                print(f"{step=}, {start_epoch=}, {best_loss=}")
 
                 # Initialize state if not exists
                 if not hasattr(self, 'state'):
@@ -2306,20 +1763,17 @@ class OptimizedUniRef50Trainer:
                 else:
                     self.state['step'] = step
 
-                print(self.state['step'])
                 print(f"✅ Resumed from checkpoint:")
                 print(f"   Step: {step}")
                 print(f"   Epoch: {start_epoch}")
                 print(f"   Best loss: {best_loss:.4f}")
 
-            if False:#except Exception as e:
+            except Exception as e:
                 print(f"⚠️  Could not load checkpoint: {e}")
                 print("Starting training from scratch...")
                 step = 0
                 start_epoch = 0
                 best_loss = float('inf')
-                import sys
-                sys.exit()
         else:
             if self.force_fresh_start:
                 print("🆕 Force fresh start enabled. Starting training from scratch...")
@@ -2354,11 +1808,6 @@ class OptimizedUniRef50Trainer:
         print(f"🔄 Training for {total_epochs} epochs (override: {self.epochs_override}, config: {self.cfg.training.epochs})")
 
         for epoch in range(start_epoch, total_epochs):
-            # Set epoch for distributed sampler to ensure proper shuffling
-            if self.use_ddp and hasattr(self.train_sampler, 'set_epoch'):
-                self.train_sampler.set_epoch(epoch)
-                print(f"🔄 Set sampler epoch to {epoch} for proper data shuffling")
-
             epoch_loss = 0.0
             num_batches = 0
 
@@ -2383,7 +1832,7 @@ class OptimizedUniRef50Trainer:
                 })
 
                 # Detailed logging
-                if step % self.cfg.training.log_freq*5 == 0:
+                if step % self.cfg.training.log_freq == 0:
                     avg_loss = running_loss / self.cfg.training.log_freq
                     interval_time = time.time() - log_interval_start_time
 
@@ -2404,57 +1853,13 @@ class OptimizedUniRef50Trainer:
                     running_loss = 0.0
                     log_interval_start_time = time.time()
 
-                # Log reconstruction and fixed noise losses every 100 steps (RANK 0 ONLY)
-                if step % self.cfg.training.log_freq * 5 == 0 and step > 0:
-                    print(f"🔍 Computing reconstruction and fixed noise losses at step {step}...")
-                    try:
-                        # Get a single batch for loss computation
-                        sample_batch = next(iter(self.val_loader))
-                        sample_batch = sample_batch.to(self.device)
-
-                        # Use smaller batch size to avoid OOM - take first 4 samples
-                        small_batch_size = min(4, sample_batch.shape[0])
-                        small_batch = sample_batch[:small_batch_size]
-
-                        # Compute reconstruction loss (t=0, no noise)
-                        recon_loss = self.eval_reconstruction_loss(small_batch)
-
-                        # Compute fixed noise level losses
-                        fixed_noise_metrics = self.eval_fixed_noise_levels(small_batch)
-
-                        # Log to wandb
-                        metrics_to_log = {
-                            'train/step': step,
-                            'train/epoch': epoch,
-                        }
-
-                        if recon_loss is not None:
-                            metrics_to_log['train/reconstruction_loss'] = recon_loss
-                            print(f"   📊 Reconstruction Loss: {recon_loss:.4f}")
-                        else:
-                            print("   ⚠️  Reconstruction loss is None")
-
-                        for noise_key, noise_value in fixed_noise_metrics.items():
-                            if noise_value is not None:
-                                metrics_to_log[f'train/{noise_key}'] = noise_value
-                                print(f"   📊 {noise_key}: {noise_value:.4f}")
-                            else:
-                                print(f"   ⚠️  {noise_key}: None (skipped)")
-                            #wandb.log(metrics_to_log, step=step)
-
-                    except Exception as e:
-                        print(f"⚠️  Warning: Could not compute reconstruction/fixed noise losses: {e}")
-                        # Continue training even if logging fails
-
-                # Note: No barrier needed here - only rank 0 does evaluation, others continue normally
-
                 # Quick generation test (more frequent than comprehensive evaluation)
-                quick_gen_freq = getattr(self.cfg.training, 'quick_gen_freq', self.cfg.training.log_freq * 30)
+                quick_gen_freq = getattr(self.cfg.training, 'quick_gen_freq', self.cfg.training.log_freq * 2)
                 if step % quick_gen_freq == 0 and step > 0:
                     self.quick_generation_test(step, epoch)
 
-                # Comprehensive evaluation (skip in minimal mode)
-                if not self.minimal_mode and step % self.cfg.training.eval_freq == 0:
+                # Comprehensive evaluation
+                if step % self.cfg.training.eval_freq == 0:
                     val_loss, generation_properties = self.comprehensive_evaluation(
                         step, epoch, num_samples=10, sampling_method=self.sampling_method
                     )
@@ -2475,17 +1880,15 @@ class OptimizedUniRef50Trainer:
                         best_loss = avg_epoch_loss
                         print(f"🎉 New best loss: {best_loss:.4f}")
 
-                        if self.rank==0:
-                            self.save_checkpoint(step, epoch, best_loss, is_best)
+                    self.save_checkpoint(step, epoch, best_loss, is_best)
 
                     # Log checkpoint info
-                    if False:
-                        self.log_to_wandb({
-                            'checkpoint/step': step,
-                            'checkpoint/best_loss': best_loss,
-                            'checkpoint/current_loss': avg_epoch_loss,
-                            'checkpoint/is_best': is_best
-                        }, step=step)
+                    wandb.log({
+                        'checkpoint/step': step,
+                        'checkpoint/best_loss': best_loss,
+                        'checkpoint/current_loss': avg_epoch_loss,
+                        'checkpoint/is_best': is_best
+                    }, step=step)
 
                 # Early stopping check
                 if step >= self.cfg.training.n_iters:
@@ -2494,7 +1897,7 @@ class OptimizedUniRef50Trainer:
 
             # End of epoch logging
             avg_epoch_loss = epoch_loss / num_batches
-            self.log_to_wandb({
+            wandb.log({
                 'epoch/loss': avg_epoch_loss,
                 'epoch/number': epoch,
                 'epoch/step': step
@@ -2515,7 +1918,7 @@ class OptimizedUniRef50Trainer:
                 self.save_checkpoint(step, epoch+1, best_loss, is_best=True)
 
             # Log epoch summary
-            self.log_to_wandb({
+            wandb.log({
                 'epoch/number': epoch + 1,
                 'epoch/avg_train_loss': avg_epoch_loss,
                 'epoch/val_loss': val_loss,
@@ -2537,7 +1940,7 @@ class OptimizedUniRef50Trainer:
         )
 
         # Training summary
-        self.log_to_wandb({
+        wandb.log({
             'summary/final_step': step,
             'summary/final_train_loss': epoch_loss / num_batches,
             'summary/final_val_loss': final_val_loss,
@@ -2561,19 +1964,36 @@ class OptimizedUniRef50Trainer:
         print(f"📈 Final validation loss: {final_val_loss:.4f}")
         print(f"🏆 Best training loss: {best_loss:.4f}")
 
-        # Clean up DDP process group
-        self.cleanup_ddp()
-
-        # Cleanup logging
-        if self.use_wandb:
-            wandb.finish()
-            print("✅ Wandb logging completed")
-        else:
-            print("✅ File logging completed")
+        wandb.finish()
+        print("✅ Wandb logging completed")
 
 
 def main():
-    
+    """Main entry point."""
+    import argparse
+    import os, socket
+
+    try:
+        from mpi4py import MPI
+        # Print startup banner
+        comm = MPI.COMM_WORLD
+        size = comm.Get_size()
+        rank = comm.Get_rank()
+        local_rank = os.environ.get('PALS_LOCAL_RANK', 0)
+        os.environ['RANK'] = str(rank)
+        os.environ['WORLD_SIZE'] = str(size)
+        MASTER_ADDR = socket.gethostname() if rank == 0 else None
+        MASTER_ADDR = comm.bcast(MASTER_ADDR, root=0)
+        os.environ['MASTER_ADDR'] = f"{MASTER_ADDR}.hsn.cm.aurora.alcf.anl.gov"
+        os.environ['MASTER_PORT'] = '2345'
+        print(f"DDP: Hi from rank {rank} of {size} with local rank {local_rank}. {MASTER_ADDR}")
+
+    except ImportError:
+        print("MPI not available, falling back to single node")
+        rank = 0
+        size = 1
+        local_rank = 0
+
     print("\n" + "="*80)
     print("🧬 OPTIMIZED UNIREF50 SEDD TRAINING")
     print("="*80)
@@ -2590,20 +2010,11 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to use")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--fresh", action="store_true", help="Force fresh start (ignore existing checkpoints)")
-    parser.add_argument("--resume_checkpoint", type=str, default=None, required=False)
     parser.add_argument("--sampling_method", type=str, default="rigorous",
                        choices=["rigorous", "simple"],
                        help="Sampling method: 'rigorous' (CTMC) or 'simple' (heuristic)")
     parser.add_argument("--epochs", type=int, default=None,
                        help="Override number of epochs (useful for hyperparameter sweeps)")
-    parser.add_argument("--tokenize_on_fly", action="store_true",
-                       help="Tokenize untokenized data on the fly (use with raw sequence data)")
-    parser.add_argument("--use_streaming", action="store_true",
-                       help="Use streaming mode for very large files (>50GB)")
-    parser.add_argument("--no_wandb", action="store_true",
-                       help="Disable wandb logging and use file logging instead")
-    parser.add_argument("--minimal_mode", action="store_true",
-                       help="Minimal mode: disable evaluations and complex logging for large-scale DDP debugging")
 
     args = parser.parse_args()
 
@@ -2619,9 +2030,6 @@ def main():
     print(f"🖥️  Device: {args.device}")
     print(f"🎲 Seed: {args.seed}")
     print(f"🧬 Sampling method: {args.sampling_method}")
-    print(f"🔤 Tokenize on fly: {args.tokenize_on_fly}")
-    print(f"🌊 Use streaming: {args.use_streaming}")
-    print(f"📊 Wandb logging: {'disabled' if args.no_wandb else 'enabled'}")
     print()
 
     try:
@@ -2631,21 +2039,14 @@ def main():
             work_dir=args.work_dir,
             config_file=args.config,
             datafile=args.datafile,
-            rank=0,
-            world_size=0,
+            rank=rank,
+            world_size=size,
             dev_id=args.device,
             seed=args.seed,
             force_fresh_start=args.fresh,
             sampling_method=args.sampling_method,
-            epochs_override=args.epochs,
-            use_wandb=not args.no_wandb,
-            minimal_mode=args.minimal_mode,
-            resume_checkpoint=args.resume_checkpoint
+            epochs_override=args.epochs
         )
-
-        # Set tokenization and streaming options
-        trainer.tokenize_on_fly = args.tokenize_on_fly
-        trainer.use_streaming = args.use_streaming
 
         print("✅ Trainer initialized successfully!")
         print()
@@ -2658,14 +2059,6 @@ def main():
         import traceback
         traceback.print_exc()
         print("\n💡 Check the error above and verify your configuration.")
-
-        # Cleanup DDP even if training failed
-        try:
-            if 'trainer' in locals() and hasattr(trainer, 'cleanup_ddp'):
-                trainer.cleanup_ddp()
-        except Exception as cleanup_error:
-            print(f"⚠️  DDP cleanup failed: {cleanup_error}")
-
         return 1
 
     print("\n🎉 Training completed successfully!")
