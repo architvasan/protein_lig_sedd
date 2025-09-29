@@ -51,12 +51,41 @@ import torch.distributed as dist
 import argparse
 import datetime
 
-def setup_ddp(rank, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-    # Use ccl backend for Intel XPU instead of nccl
-    dist.init_process_group("ccl", rank=rank, world_size=world_size)
-    torch.xpu.set_device(rank)
+def setup_ddp_aurora():
+    """Setup DDP for Aurora with proper Intel XPU handling."""
+    # DDP: Set environmental variables used by PyTorch
+    SIZE = MPI.COMM_WORLD.Get_size()
+    RANK = MPI.COMM_WORLD.Get_rank()
+    LOCAL_RANK = int(os.environ.get('PALS_LOCAL_RANKID', '0'))
+
+    # Set environment variables
+    os.environ['RANK'] = str(RANK)
+    os.environ['WORLD_SIZE'] = str(SIZE)
+    os.environ['LOCAL_RANK'] = str(LOCAL_RANK)
+
+    # Setup master address for Aurora
+    MASTER_ADDR = socket.gethostname() if RANK == 0 else None
+    MASTER_ADDR = MPI.COMM_WORLD.bcast(MASTER_ADDR, root=0)
+    os.environ['MASTER_ADDR'] = f"{MASTER_ADDR}.hsn.cm.aurora.alcf.anl.gov"
+    os.environ['MASTER_PORT'] = str(2345)
+
+    print(f"DDP: Hi from rank {RANK} of {SIZE} with local rank {LOCAL_RANK}. {MASTER_ADDR}")
+
+    # Initialize distributed communication with CCL backend for Intel XPU
+    torch.distributed.init_process_group(
+        backend='ccl',
+        init_method='env://',
+        rank=int(RANK),
+        world_size=int(SIZE)
+    )
+
+    # Set XPU device
+    torch.xpu.set_device(LOCAL_RANK)
+    device = torch.device(f'xpu:{LOCAL_RANK}')
+
+    print(f"✅ DDP initialized: rank {RANK}/{SIZE}, local_rank {LOCAL_RANK}, device {device}")
+
+    return RANK, device, SIZE
 
 def setup_ddp_polaris(rank, world_size):
     # DDP: Set environmental variables used by PyTorch
@@ -415,7 +444,7 @@ class OptimizedUniRef50Trainer:
         np.random.seed(self.seed)
 
         if self.use_ddp:
-            self.rank, self.device, self.world_size = setup_ddp_polaris(self.rank, self.world_size)
+            self.rank, self.device, self.world_size = setup_ddp_aurora()
             #self.device = torch.device(f"cuda:{device_id}")
         else:
             self.device = torch.device(self.dev_id)
@@ -639,12 +668,15 @@ class OptimizedUniRef50Trainer:
         device_type = str(self.device).split(':')[0]
         pin_memory = device_type in ['cuda', 'xpu']  # Pin memory for CUDA and XPU
 
+        # Use distributed sampler for DDP
         self.train_sampler = DistributedSampler(
-                            train_dataset,
-                            num_replicas=dist.get_world_size(),
-                            rank=self.rank,
-                            shuffle=True,
-                            drop_last=False)
+            train_dataset,
+            num_replicas=self.world_size,
+            rank=self.rank,
+            shuffle=True,
+            drop_last=False,
+            seed=self.seed  # Ensure reproducible shuffling across ranks
+        )
 
         print(f"{self.train_sampler=}")
         self.train_loader = DataLoader(
@@ -731,17 +763,29 @@ class OptimizedUniRef50Trainer:
         # Restore original config
         self.cfg.optim.lr = original_lr
 
-        # Apply IPEX optimization for Intel XPU
+        # Move model to device first
+        self.model.to(self.device)
+
+        # Apply device-specific optimizations
         device_type = str(self.device).split(':')[0]
         if device_type == 'xpu':
             print("🔧 Applying IPEX optimization for Intel XPU...")
-            self.model.to(self.device)
-            self.model, self.optimizer = ipex.optimize(self.model, optimizer=self.optimizer)
-            self.scaler = torch.xpu.amp.GradScaler()
-            self.use_amp = True
-            print("✅ Using XPU mixed precision training with IPEX optimization")
+            try:
+                # Apply IPEX optimization before DDP wrapping
+                self.model, self.optimizer = ipex.optimize(
+                    self.model,
+                    optimizer=self.optimizer,
+                    dtype=torch.bfloat16  # Use bfloat16 for better XPU performance
+                )
+                self.scaler = torch.xpu.amp.GradScaler()
+                self.use_amp = True
+                print("✅ IPEX optimization applied with bfloat16 mixed precision")
+            except Exception as e:
+                print(f"⚠️  IPEX optimization failed: {e}")
+                print("   Continuing without IPEX optimization...")
+                self.scaler = None
+                self.use_amp = False
         elif device_type == 'cuda':
-            self.model.to(self.device)
             self.scaler = torch.cuda.amp.GradScaler()
             self.use_amp = True
             print("✅ Using CUDA mixed precision training")
@@ -828,15 +872,28 @@ class OptimizedUniRef50Trainer:
                 f.write(metric_str + "\n")
 
     def wrap_model_ddp(self):
+        """Wrap model with DDP - Aurora/XPU compatible version."""
         if self.use_ddp:
-            # Get the local device ID (not the global rank)
-            local_device_id = self.device #int(str(self.device).split(':')[1])
-            self.model_ddp = DDP(
-                                self.model,
-                                device_ids=[local_device_id],
-                                output_device=local_device_id,
-                                find_unused_parameters=False)
-            print(f"✅ Model wrapped with DDP on device {local_device_id}")
+            device_type = str(self.device).split(':')[0]
+
+            if device_type == 'xpu':
+                # For Intel XPU on Aurora, DDP doesn't use device_ids parameter
+                print(f"🔧 Wrapping model with DDP for Intel XPU...")
+                self.model_ddp = DDP(
+                    self.model,
+                    find_unused_parameters=False
+                )
+                print(f"✅ Model wrapped with DDP for XPU device {self.device}")
+            else:
+                # For CUDA devices, use traditional approach
+                local_device_id = int(str(self.device).split(':')[1])
+                self.model_ddp = DDP(
+                    self.model,
+                    device_ids=[local_device_id],
+                    output_device=local_device_id,
+                    find_unused_parameters=False
+                )
+                print(f"✅ Model wrapped with DDP on CUDA device {local_device_id}")
         else:
             self.model_ddp = self.model
             print("✅ Using model without DDP wrapper")
@@ -1999,20 +2056,21 @@ class OptimizedUniRef50Trainer:
             print(f"Reshaped batch to: {batch.shape}")
 
         # Compute loss with DDP-aware accumulation
-        if self.use_ddp:
-            # For DDP, disable gradient accumulation to avoid sync issues
-            loss = self.compute_loss(batch) / self.cfg.training.accum
-            effective_accum = self.cfg.training.accum
-        else:
-            loss = self.compute_loss(batch) / self.cfg.training.accum
-            effective_accum = self.cfg.training.accum
+        loss = self.compute_loss(batch) / self.cfg.training.accum
+        effective_accum = self.cfg.training.accum
 
         # Backward pass with device-aware gradient scaling
-        # Note: For DDP, we disabled gradient accumulation to avoid sync issues
         if self.scaler is not None:
             self.scaler.scale(loss).backward()
         else:
             loss.backward()
+
+        # DDP synchronization - ensure gradients are synchronized across ranks
+        if self.use_ddp:
+            # DDP automatically synchronizes gradients during backward pass
+            # But we can add explicit barrier for debugging if needed
+            # torch.distributed.barrier()  # Uncomment for debugging sync issues
+            pass
 
         # Additional metrics for logging
         additional_metrics = {}
@@ -2208,28 +2266,40 @@ class OptimizedUniRef50Trainer:
         return avg_val_loss, avg_recon_loss, avg_fixed_noise
     
     def save_checkpoint(self, step, epoch=0, best_loss=float('inf'), is_best=False):
-        """Save training checkpoint."""
+        """Save training checkpoint - only on rank 0 for DDP."""
+        # Only save checkpoints on rank 0 to avoid conflicts
+        if self.use_ddp and self.rank != 0:
+            return
+
+        # Get the actual model state (unwrap DDP if needed)
+        if self.use_ddp and hasattr(self, 'model_ddp'):
+            model_state = self.model_ddp.module.state_dict()
+        else:
+            model_state = self.model.state_dict()
+
         checkpoint = {
             'step': step,
             'epoch': epoch,
             'best_loss': best_loss,
-            'model_state_dict': self.model.state_dict(),
+            'model_state_dict': model_state,
             'ema_state_dict': self.ema.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
             'scaler_state_dict': self.scaler.state_dict() if self.scaler is not None else None,
             'noise_state_dict': self.noise.state_dict(),
-            'config': self.cfg
+            'config': self.cfg,
+            'world_size': self.world_size if self.use_ddp else 1,
+            'rank': self.rank if self.use_ddp else 0
         }
-        
+
         checkpoint_path = os.path.join(self.checkpoint_dir, f'checkpoint_step_{step}.pth')
         torch.save(checkpoint, checkpoint_path)
-        
+
         if is_best:
             best_path = os.path.join(self.checkpoint_dir, 'best_checkpoint.pth')
             torch.save(checkpoint, best_path)
-        
-        print(f"Checkpoint saved: {checkpoint_path}")
+
+        print(f"💾 Checkpoint saved (rank {self.rank}): {checkpoint_path}")
 
     def cleanup_ddp(self):
         """Clean up DDP process group safely."""
@@ -2359,12 +2429,20 @@ class OptimizedUniRef50Trainer:
                 self.train_sampler.set_epoch(epoch)
                 print(f"🔄 Set sampler epoch to {epoch} for proper data shuffling")
 
+                # Synchronize all ranks before starting epoch
+                if torch.distributed.is_initialized():
+                    torch.distributed.barrier()
+
             epoch_loss = 0.0
             num_batches = 0
 
-            progress_bar = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{total_epochs}')
+            # Only show progress bar on rank 0 to avoid cluttered output
+            if self.use_ddp and self.rank != 0:
+                data_iterator = self.train_loader
+            else:
+                data_iterator = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{total_epochs}')
 
-            for batch in progress_bar:
+            for batch in data_iterator:
                 # Training step with timing
                 loss, step_time, additional_metrics = self.train_step(batch)
 
@@ -2374,13 +2452,15 @@ class OptimizedUniRef50Trainer:
                 step += 1
                 self.state['step'] = step
 
-                # Update progress bar
-                progress_bar.set_postfix({
-                    'loss': f'{loss:.4f}',
-                    'lr': f'{self.scheduler.get_last_lr()[0]:.2e}',
-                    'step': f'{step}/{self.cfg.training.n_iters}',
-                    'device_mem': self._get_device_memory_str()
-                })
+                # Update progress bar (only on rank 0 or non-DDP)
+                if not self.use_ddp or self.rank == 0:
+                    if hasattr(data_iterator, 'set_postfix'):  # Check if it's a tqdm object
+                        data_iterator.set_postfix({
+                            'loss': f'{loss:.4f}',
+                            'lr': f'{self.scheduler.get_last_lr()[0]:.2e}',
+                            'step': f'{step}/{self.cfg.training.n_iters}',
+                            'device_mem': self._get_device_memory_str()
+                        })
 
                 # Detailed logging
                 if step % self.cfg.training.log_freq*5 == 0:
