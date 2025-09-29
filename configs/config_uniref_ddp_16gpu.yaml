@@ -1,0 +1,94 @@
+curriculum:
+  enabled: true
+  probabilistic: true
+  preschool_time: 2500
+data:
+  cache_dir: data
+  max_ligand_len: 128
+  max_protein_len: 512
+  train: uniref50
+  train_ratio: 0.95
+  use_structure: false
+  val_ratio: 0.05
+  valid: uniref50
+  vocab_size_ligand: 2364
+  vocab_size_protein: 36
+eval:
+  batch_size: 16
+  perplexity: true
+  perplexity_batch_size: 8
+graph:
+  file: data
+  report_all: false
+  type: absorb
+hydra:
+  run:
+    dir: exp_local/uniref50/${now:%Y.%m.%d}/${now:%H%M%S}
+lr_schedule:
+  max_steps: 5000000
+  min_lr_ratio: 0.1
+  type: cosine_with_warmup
+  warmup_steps: 2000
+memory:
+  gradient_checkpointing: true
+  max_memory_per_gpu: 0.9
+  mixed_precision: true
+model:
+  cond_dim: 512
+  device: cuda:0
+  dropout: 0.1
+  esm_dim: 640
+  hidden_size: 1024
+  length: 512
+  molformer_dim: 768
+  n_blocks_lig: 8
+  n_blocks_prot: 20
+  n_heads: 16
+  name: medium
+  scale_by_sigma: true
+  type: ddit
+monitoring:
+  log_gradients: true
+  log_weights: false
+  sample_frequency: 5000
+ngpus: 16
+noise:
+  eps: 0.02
+  sigma_max: 0.95
+  sigma_min: 0.01
+  type: cosine
+optim:
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1.0e-08
+  grad_clip: 1.0
+  lr: 0.00032
+  optimizer: AdamW
+  warmup: 2500
+  weight_decay: 0.01
+sampling:
+  noise_removal: true
+  predictor: euler
+  steps: 50
+tokens: 36
+training:
+  accum: 1
+  batch_size: 4
+  ema: 0.999
+  epochs: 5
+  eval_freq: 2000
+  force_reprocess: false
+  log_freq: 20
+  max_samples: 50000000
+  n_iters: 25000
+  num_workers: 4
+  seed: 42
+  snapshot_freq: 1000
+  snapshot_freq_for_preemption: 1000
+  snapshot_sampling: true
+  task: protein_only
+  weight: standard
+work_dir: /Users/ramanathana/Work/Protein-Ligand-SEDD/protein_lig_sedd
+defaults:
+- _self_
+- model: medium
