@@ -1,15 +1,25 @@
 """
 Optimized training script for UniRef50 with improved stability and efficiency.
 """
-from mpi4py import MPI
+# Optional MPI import for Aurora
+try:
+    from mpi4py import MPI
+    MPI_AVAILABLE = True
+except ImportError:
+    MPI_AVAILABLE = False
+    print("⚠️  MPI not available - DDP will be disabled")
+
 import os, socket
 import torch
+
 ### Import intel_extension_for_pytorch for running on aurora
 try:
     import intel_extension_for_pytorch as ipex
     import oneccl_bindings_for_pytorch as torch_ccl
-except:
-    print("intel_extension_for_pytorch not found, running on CPU/cuda")
+    INTEL_AVAILABLE = True
+except ImportError:
+    INTEL_AVAILABLE = False
+    print("⚠️  Intel extensions not found, running on CPU/CUDA")
 import datetime
 import os
 import sys
@@ -53,6 +63,9 @@ import datetime
 
 def setup_ddp_aurora():
     """Setup DDP for Aurora with proper Intel XPU handling."""
+    if not MPI_AVAILABLE:
+        raise RuntimeError("MPI not available - cannot setup Aurora DDP")
+
     # DDP: Set environmental variables used by PyTorch
     SIZE = MPI.COMM_WORLD.Get_size()
     RANK = MPI.COMM_WORLD.Get_rank()
@@ -88,6 +101,9 @@ def setup_ddp_aurora():
     return RANK, device, SIZE
 
 def setup_ddp_polaris(rank, world_size):
+    if not MPI_AVAILABLE:
+        raise RuntimeError("MPI not available - cannot setup Polaris DDP")
+
     # DDP: Set environmental variables used by PyTorch
     SIZE = MPI.COMM_WORLD.Get_size()
     RANK = MPI.COMM_WORLD.Get_rank()
@@ -444,9 +460,17 @@ class OptimizedUniRef50Trainer:
         np.random.seed(self.seed)
 
         if self.use_ddp:
-            self.rank, self.device, self.world_size = setup_ddp_aurora()
-            #self.device = torch.device(f"cuda:{device_id}")
+            if not MPI_AVAILABLE:
+                print("⚠️  MPI not available - disabling DDP and using single process")
+                self.use_ddp = False
+                self.rank = 0
+                self.world_size = 1
+                self.device = torch.device(self.dev_id)
+            else:
+                self.rank, self.device, self.world_size = setup_ddp_aurora()
         else:
+            self.rank = 0
+            self.world_size = 1
             self.device = torch.device(self.dev_id)
         print(f"{self.rank=}")
         print(f"{self.device=}")
@@ -769,20 +793,26 @@ class OptimizedUniRef50Trainer:
         # Apply device-specific optimizations
         device_type = str(self.device).split(':')[0]
         if device_type == 'xpu':
-            print("🔧 Applying IPEX optimization for Intel XPU...")
-            try:
-                # Apply IPEX optimization before DDP wrapping
-                self.model, self.optimizer = ipex.optimize(
-                    self.model,
-                    optimizer=self.optimizer,
-                    dtype=torch.bfloat16  # Use bfloat16 for better XPU performance
-                )
-                self.scaler = torch.xpu.amp.GradScaler()
-                self.use_amp = True
-                print("✅ IPEX optimization applied with bfloat16 mixed precision")
-            except Exception as e:
-                print(f"⚠️  IPEX optimization failed: {e}")
-                print("   Continuing without IPEX optimization...")
+            if INTEL_AVAILABLE:
+                print("🔧 Applying IPEX optimization for Intel XPU...")
+                try:
+                    # Apply IPEX optimization without forcing dtype conversion
+                    # Let IPEX handle mixed precision automatically
+                    self.model, self.optimizer = ipex.optimize(
+                        self.model,
+                        optimizer=self.optimizer
+                        # Removed dtype=torch.bfloat16 to avoid dtype mismatch issues
+                    )
+                    self.scaler = torch.xpu.amp.GradScaler()
+                    self.use_amp = True
+                    print("✅ IPEX optimization applied with automatic mixed precision")
+                except Exception as e:
+                    print(f"⚠️  IPEX optimization failed: {e}")
+                    print("   Continuing without IPEX optimization...")
+                    self.scaler = None
+                    self.use_amp = False
+            else:
+                print("⚠️  Intel extensions not available - skipping IPEX optimization")
                 self.scaler = None
                 self.use_amp = False
         elif device_type == 'cuda':
@@ -1220,22 +1250,35 @@ class OptimizedUniRef50Trainer:
                     # Start with all absorbing tokens
                     sample = torch.full((1, max_length), absorbing_token, dtype=torch.long, device=self.device)
 
+                    # Ensure sample has correct dtype for model
+                    model_dtype = next(self.model.parameters()).dtype
+                    if sample.dtype != model_dtype and model_dtype != torch.long:
+                        # Only convert if model expects non-long dtype (unusual but possible)
+                        sample = sample.to(dtype=model_dtype)
+
                     # Diffusion denoising process
                     for step in range(num_diffusion_steps):
                         # Compute timestep (from 1.0 to 0.0)
-                        t = torch.tensor([1.0 - step / num_diffusion_steps], device=self.device)
+                        t = torch.tensor([1.0 - step / num_diffusion_steps], device=self.device, dtype=model_dtype)
+
+                        # Get sigma from noise scheduler (models expect sigma, not raw timestep)
+                        sigma, _ = self.noise(t)
+
+                        # Ensure sigma has correct dtype
+                        if sigma.dtype != model_dtype:
+                            sigma = sigma.to(dtype=model_dtype)
 
                         # Get model predictions (use DDP model)
                         model_to_use = self.model_ddp if self.use_ddp else self.model
                         device_type = str(self.device).split(':')[0]
                         if device_type == 'xpu':
                             with torch.xpu.amp.autocast(enabled=False):
-                                logits = model_to_use(sample, t)
+                                logits = model_to_use(sample, sigma)  # Use sigma instead of t
                         elif device_type == 'cuda':
                             with torch.cuda.amp.autocast(enabled=False):
-                                logits = model_to_use(sample, t)
+                                logits = model_to_use(sample, sigma)  # Use sigma instead of t
                         else:
-                            logits = model_to_use(sample, t)
+                            logits = model_to_use(sample, sigma)  # Use sigma instead of t
 
                         # Temperature sampling
                         probs = torch.softmax(logits / temperature, dim=-1)
@@ -1956,7 +1999,16 @@ class OptimizedUniRef50Trainer:
             t = torch.rand(batch.shape[0], device=self.device) * (1 - 1e-3) + 1e-3
 
         sigma, dsigma = self.noise(t)
-        
+
+        # Ensure consistent dtypes for all tensors
+        model_dtype = next(self.model.parameters()).dtype
+        if batch.dtype != model_dtype:
+            batch = batch.to(dtype=model_dtype)
+        if sigma.dtype != model_dtype:
+            sigma = sigma.to(dtype=model_dtype)
+        if dsigma.dtype != model_dtype:
+            dsigma = dsigma.to(dtype=model_dtype)
+
         # Apply curriculum learning (sigma scaling approach)
         if (hasattr(self.cfg, 'curriculum') and self.cfg.curriculum.enabled and
             not getattr(self.cfg.curriculum, 'probabilistic', False)):
@@ -2046,8 +2098,14 @@ class OptimizedUniRef50Trainer:
 
         self.model.train()
 
-        # Move batch to device and ensure correct shape
+        # Move batch to device and ensure correct shape and dtype
         batch = batch.to(self.device)
+
+        # Ensure consistent dtype - convert to model's dtype if needed
+        model_dtype = next(self.model.parameters()).dtype
+        if batch.dtype != model_dtype:
+            print(f"🔧 Converting batch dtype from {batch.dtype} to {model_dtype}")
+            batch = batch.to(dtype=model_dtype)
 
         # Ensure batch is 2D: [batch_size, sequence_length]
         if batch.dim() > 2:
@@ -2306,8 +2364,8 @@ class OptimizedUniRef50Trainer:
         if self.use_ddp and torch.distributed.is_initialized():
             print("🔄 Cleaning up DDP process group...")
             try:
-                # Try barrier with timeout, but don't fail if it times out
-                torch.distributed.barrier(timeout=30)  # 30 second timeout
+                # Try barrier without timeout (timeout parameter not supported in all PyTorch versions)
+                torch.distributed.barrier()
                 print("✅ Final barrier completed")
             except Exception as e:
                 print(f"⚠️  Final barrier failed (continuing cleanup): {e}")
