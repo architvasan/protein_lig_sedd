@@ -1,7 +1,3 @@
-#curriculum:
-#  difficulty_ramp: exponential
-#  enabled: true
-#  preschool_time: 2500
 curriculum:
   enabled: true
   probabilistic: true
@@ -57,7 +53,7 @@ model:
 monitoring:
   log_gradients: true
   log_weights: false
-  sample_frequency: 5000
+  sample_frequency: 2000
 ngpus: 1
 noise:
   eps: 0.02
@@ -76,18 +72,18 @@ optim:
 sampling:
   noise_removal: true
   predictor: euler
-  steps: 50
+  steps: 100
 tokens: 36
 training:
   accum: 4
   batch_size: 16
   ema: 0.999
-  epochs: 5
+  epochs: 10
   eval_freq: 2000
   force_reprocess: false
   log_freq: 20
   max_samples: 50000000
-  n_iters: 25000
+  n_iters: 2500000000
   num_workers: 4
   seed: 42
   snapshot_freq: 1000

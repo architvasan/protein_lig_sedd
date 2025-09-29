@@ -1116,7 +1116,7 @@ class OptimizedUniRef50Trainer:
 
                         generated_sequences.append({
                             'sample_id': i,
-                            'raw_tokens': sample_tokens[:50].cpu().tolist(),
+                            'raw_tokens': sample_tokens.cpu().tolist(),
                             'sequence': decoded_sequence,
                             'length': len(decoded_sequence),
                             'unique_amino_acids': len(set(decoded_sequence)) if decoded_sequence else 0
@@ -1198,7 +1198,7 @@ class OptimizedUniRef50Trainer:
 
                     generated_sequences.append({
                         'sample_id': i,
-                        'raw_tokens': sample[0][:50].cpu().tolist(),  # First 50 tokens for debugging
+                        'raw_tokens': sample[0].cpu().tolist(),  # First 50 tokens for debugging
                         'sequence': decoded_sequence,
                         'length': len(decoded_sequence),
                         'unique_amino_acids': len(set(decoded_sequence)) if decoded_sequence else 0
@@ -1235,7 +1235,7 @@ class OptimizedUniRef50Trainer:
         else:
             raise ValueError(f"Unknown sampling method: {sampling_method}. Use 'rigorous' or 'simple'.")
 
-    def quick_generation_test(self, step: int, epoch: int, num_samples: int = 3, max_length: int = 128):
+    def quick_generation_test(self, step: int, epoch: int, num_samples: int = 10, max_length: int = 128):
         """Quick generation test during training to monitor generation quality - ALL RANKS participate."""
         # All ranks participate to prevent sync issues
 
@@ -2274,27 +2274,31 @@ class OptimizedUniRef50Trainer:
         checkpoint_path = os.path.join(self.checkpoint_dir, 'best_checkpoint.pth')
         if self.resume_checkpoint:
             checkpoint_path = self.resume_checkpoint
-
+            print(f"{checkpoint_path=}")
         if not self.force_fresh_start and os.path.exists(checkpoint_path):
             print(f"📂 Found existing checkpoint: {checkpoint_path}")
-            try:
-                checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-
+            if True: #try:
+                checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+                print(f"Loaded checkpoint: {checkpoint}")
                 # Load model state
                 self.model.load_state_dict(checkpoint['model_state_dict'])
-
+                print(f"Loaded model state_dict")
+                
                 # Load optimizer state
                 if 'optimizer_state_dict' in checkpoint:
                     self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    print(f"Loaded optimizer state dict")
 
                 # Load scheduler state
                 if 'scheduler_state_dict' in checkpoint:
                     self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                    print("Loaded scheduler state dict")
 
                 # Load training state
                 step = checkpoint.get('step', 0)
                 start_epoch = checkpoint.get('epoch', 0)
                 best_loss = checkpoint.get('best_loss', float('inf'))
+                print(f"{step=}, {start_epoch=}, {best_loss=}")
 
                 # Initialize state if not exists
                 if not hasattr(self, 'state'):
@@ -2302,17 +2306,20 @@ class OptimizedUniRef50Trainer:
                 else:
                     self.state['step'] = step
 
+                print(self.state['step'])
                 print(f"✅ Resumed from checkpoint:")
                 print(f"   Step: {step}")
                 print(f"   Epoch: {start_epoch}")
                 print(f"   Best loss: {best_loss:.4f}")
 
-            except Exception as e:
+            if False:#except Exception as e:
                 print(f"⚠️  Could not load checkpoint: {e}")
                 print("Starting training from scratch...")
                 step = 0
                 start_epoch = 0
                 best_loss = float('inf')
+                import sys
+                sys.exit()
         else:
             if self.force_fresh_start:
                 print("🆕 Force fresh start enabled. Starting training from scratch...")
@@ -2442,7 +2449,7 @@ class OptimizedUniRef50Trainer:
                 # Note: No barrier needed here - only rank 0 does evaluation, others continue normally
 
                 # Quick generation test (more frequent than comprehensive evaluation)
-                quick_gen_freq = getattr(self.cfg.training, 'quick_gen_freq', self.cfg.training.log_freq * 10)
+                quick_gen_freq = getattr(self.cfg.training, 'quick_gen_freq', self.cfg.training.log_freq * 30)
                 if step % quick_gen_freq == 0 and step > 0:
                     self.quick_generation_test(step, epoch)
 
@@ -2460,7 +2467,7 @@ class OptimizedUniRef50Trainer:
                     print(f"✅ Evaluation completed. Val loss: {val_loss:.4f}")
 
                 # Checkpointing
-                if step % self.cfg.training.snapshot_freq*5 == 0:
+                if step % self.cfg.training.snapshot_freq == 0:
                     avg_epoch_loss = epoch_loss / num_batches
                     is_best = avg_epoch_loss < best_loss
 
@@ -2468,7 +2475,8 @@ class OptimizedUniRef50Trainer:
                         best_loss = avg_epoch_loss
                         print(f"🎉 New best loss: {best_loss:.4f}")
 
-                    self.save_checkpoint(step, epoch, best_loss, is_best)
+                        if self.rank==0:
+                            self.save_checkpoint(step, epoch, best_loss, is_best)
 
                     # Log checkpoint info
                     if False:
@@ -2582,6 +2590,7 @@ def main():
     parser.add_argument("--device", type=str, default="cuda:0", help="Device to use")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--fresh", action="store_true", help="Force fresh start (ignore existing checkpoints)")
+    parser.add_argument("--resume_checkpoint", type=str, default=None, required=False)
     parser.add_argument("--sampling_method", type=str, default="rigorous",
                        choices=["rigorous", "simple"],
                        help="Sampling method: 'rigorous' (CTMC) or 'simple' (heuristic)")
@@ -2630,7 +2639,8 @@ def main():
             sampling_method=args.sampling_method,
             epochs_override=args.epochs,
             use_wandb=not args.no_wandb,
-            minimal_mode=args.minimal_mode
+            minimal_mode=args.minimal_mode,
+            resume_checkpoint=args.resume_checkpoint
         )
 
         # Set tokenization and streaming options

@@ -3,7 +3,7 @@
 Unit tests for checkpoint loading and training resumption.
 Tests the critical functionality of saving/loading model state and continuing training.
 """
-
+from mpi4py import MPI
 import pytest
 import torch
 import tempfile
@@ -48,7 +48,7 @@ class TestCheckpointResume:
             # Fallback to basic config if config utils not available
             config = {
                 'model': {
-                    'hidden_size': 64,
+                    'hidden_size': 128,
                     'n_heads': 4,
                     'n_blocks_prot': 2,
                     'n_blocks_lig': 2,
@@ -75,7 +75,7 @@ class TestCheckpointResume:
                     'weight_decay': 0.01,
                 },
                 'data': {
-                    'max_protein_len': 16,
+                    'max_protein_len': 32,
                     'vocab_size_protein': 25,
                 },
                 'noise': {
@@ -107,7 +107,7 @@ class TestCheckpointResume:
             },
             'data': {
                 **config.get('data', {}),
-                'max_protein_len': 16,  # Very short sequences
+                'max_protein_len': 32,  # Very short sequences
             },
             'curriculum': {
                 'enabled': False,  # Disable curriculum for simpler testing
@@ -116,15 +116,12 @@ class TestCheckpointResume:
                 'gradient_checkpointing': False,
                 'mixed_precision': False,
             },
-        })
             'train_ratio': 0.95,
             'use_structure': False,
             'val_ratio': 0.05,
             'valid': 'uniref50',
             'vocab_size_ligand': 2364,
             'vocab_size_protein': 36,
-        },
-
         # Evaluation settings
         'eval': {
             'batch_size': 16,
@@ -156,7 +153,7 @@ class TestCheckpointResume:
 
         # Memory optimization settings
         'memory': {
-            'gradient_checkpointing': True,
+            'gradient_checkpointing': False,
             'max_memory_per_gpu': 0.9,
             'mixed_precision': True,
         },
@@ -246,7 +243,7 @@ class TestCheckpointResume:
             '_self_',
             {'model': 'medium'},
         ],
-    }
+    })
     #    config = {
     #        'tokens': 28,
     #        'model': {
