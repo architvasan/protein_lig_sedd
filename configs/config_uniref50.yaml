@@ -76,17 +76,18 @@ sampling:
 tokens: 36
 training:
   accum: 4
-  batch_size: 16
+  batch_size: 32
   ema: 0.999
   epochs: 10
   eval_freq: 2000
   force_reprocess: false
-  log_freq: 20
+  log_freq: 100
+  quick_gen_freq: 500
   max_samples: 50000000
   n_iters: 2500000000
   num_workers: 4
   seed: 42
-  snapshot_freq: 1000
+  snapshot_freq: 500
   snapshot_freq_for_preemption: 1000
   snapshot_sampling: true
   task: protein_only

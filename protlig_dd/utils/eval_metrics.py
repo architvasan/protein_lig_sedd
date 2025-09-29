@@ -18,10 +18,10 @@ from dataclasses import dataclass
 class ProteinEvaluator:
     """Evaluate protein designability using various metrics"""
     prot_model_id: str = "facebook/esm2_t30_150M_UR50D"
-    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device: str = 'cuda' if torch.cuda.is_available() else 'xpu'
     protein_sequences: list = None
     def __post_init__(self):
-            self.protein_model = AutoModel.from_pretrained(self.prot_model_id).to('cuda')
+            self.protein_model = AutoModel.from_pretrained(self.prot_model_id).to(self.device)
             self.protein_tokenizer = AutoTokenizer.from_pretrained(self.prot_model_id, padding='max_length', max_length=1022)#,  # Pad to 512 tokens)
     
     def calculate_designability_score(self):
@@ -107,7 +107,7 @@ class ProteinEvaluator:
                     confidences.append(0.0)
                     continue
                     
-                tokens = self.protein_tokenizer(sequences, padding='max_length', max_length=1022, truncation=True, return_tensors="pt").to('cuda')
+                tokens = self.protein_tokenizer(sequences, padding='max_length', max_length=1022, truncation=True, return_tensors="pt").to(self.device)
                 
                 outputs = self.protein_model(**tokens)
                 # Use negative loss as confidence metric
@@ -130,7 +130,7 @@ class ProteinEvaluator:
             with torch.no_grad():
                 for seq in sequences:
 
-                    tokens = self.protein_tokenizer(seq, return_tensors="pt", padding='max_length', max_length=1022, truncation=True).to('cuda')
+                    tokens = self.protein_tokenizer(seq, return_tensors="pt", padding='max_length', max_length=1022, truncation=True).to(self.device)
                     outputs = mlm_model.base_model(**tokens, output_hidden_states=True)
                     last_hidden = outputs.hidden_states[-1][0]
                     mask = tokens['attention_mask'][0].bool()
@@ -178,7 +178,8 @@ class ProteinEvaluator:
             torch.manual_seed(seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(seed)
-
+            elif torch.xpu.is_available():
+                torch.xpu.manual_seed_all(seed)
         mlm_model = EsmForMaskedLM.from_pretrained(self.prot_model_id).to(self.device)
         mlm_model.eval()
 

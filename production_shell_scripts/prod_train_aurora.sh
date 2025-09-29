@@ -24,7 +24,7 @@
 # 🔧 CONFIGURATION - MODIFY THESE AS NEEDED
 #############################################
 # Execution Mode
-EXECUTION_MODE="interactive"       # Options: "interactive", "queue"
+EXECUTION_MODE="queue"       # Options: "interactive", "queue"
                             # interactive: Run training directly (for testing/debugging)
                             # queue: Submit PBS job to Polaris queue system
 
@@ -36,7 +36,7 @@ PWD="/flare/FoundEpidem/avasan/IDEAL/Diffusion/diffusion_training/protein_lig_se
 # Job Configuration
 JOB_NAME="aurora_sedd_ddp"
 QUEUE="debug-scaling"                # Polaris queue name
-WALLTIME="00:15:00"          # 2 hours
+WALLTIME="06:00:00"          # 2 hours
 PPN=12                        # Processes per node (should match NUM_GPUS)
 NUM_GPUS=$((NODES * PPN))                    # Number of CUDA devices to use
 
@@ -48,7 +48,7 @@ WORK_DIR="${PWD}/experiments/polaris_ddp_${NODES}nodes$(date +%Y%m%d_%H%M%S)"
 CONFIG_FILE="${PWD}/configs/config_uniref50.yaml"
 DATAFILE="${PWD}/input_data/processed_uniref50.pt"
 WANDB_PROJECT="uniref50_polaris_ddp"
-DEVICE="cuda"  # Polaris uses NVIDIA CUDA
+DEVICE="xpu"  # Polaris uses NVIDIA CUDA
 SEED=42
 
 # DDP Configuration
@@ -97,7 +97,7 @@ mkdir -p "$WORK_DIR"
 mkdir -p "$LOG_DIR"
 
 # Generate unique run name
-RUN_NAME="polaris_ddp_${NODES}_$(date +%Y%m%d_%H%M%S)"
+RUN_NAME="aurora_ddp_${NODES}_$(date +%Y%m%d_%H%M%S)"
 
 # Check if checkpoints exist in work directory
 if [ -d "$WORK_DIR/checkpoints" ] && [ "$(ls -A $WORK_DIR/checkpoints)" ]; then
@@ -138,7 +138,7 @@ else
 fi
 
 echo ""
-echo "🚀 Starting Polaris DDP training..."
+echo "🚀 Starting Aurora DDP training..."
 echo "=================================="
 
 echo "📋 Final Training Configuration:"
@@ -158,7 +158,7 @@ echo ""
 if [ "$EXECUTION_MODE" = "interactive" ]; then
     echo "🚀 Running training interactively..."
 else
-    echo "🚀 Proceeding with Polaris DDP job submission..."
+    echo "🚀 Proceeding with Aurora DDP job submission..."
 fi
 
 echo ""
@@ -200,44 +200,35 @@ if [ "$EXECUTION_MODE" = "interactive" ]; then
     fi
 
 else
-    echo "📝 Creating Polaris job script..."
+    echo "📝 Creating Aurora job script..."
 
     # Create Polaris job script
-    JOB_SCRIPT="$WORK_DIR/polaris_ddp_job.sh"
+    JOB_SCRIPT="$WORK_DIR/aurora_ddp_job_nodes${NODES}.sh"
     cat > "$JOB_SCRIPT" << EOF
 
 #!/bin/bash
-#PBS -l select=${NODES}:system=polaris
+#PBS -l select=${NODES}:system=aurora
 #PBS -l place=scatter
 #PBS -l walltime=${WALLTIME}
 #PBS -q ${QUEUE}
 #PBS -A FoundEpidem
-#PBS -l filesystems=eagle
+#PBS -l filesystems=flare
 #PBS -N ${JOB_NAME}
-#PBS -o ${LOG_DIR}/polaris_ddp_${NODES}.out
-#PBS -e ${LOG_DIR}/polaris_ddp_${NODES}.err
+#PBS -o ${LOG_DIR}/aurora_ddp_${NODES}.out
+#PBS -e ${LOG_DIR}/aurora_ddp_${NODES}.err
 
 # Load modules and activate environment
-module use /soft/modulefiles
-module load conda
+module load frameworks
 source ${VENV_PATH}/bin/activate
 
 # Set environment variables
 export PYTHONPATH="$PWD:$PYTHONPATH"
-#export MASTER_PORT=${MASTER_PORT}
 
 # Change to work directory
 cd $PWD
 
-# Run DDP training with torchrun
-#export MASTER_ADDR=localhost
-#export MASTER_PORT=${MASTER_PORT}
-
 mpirun -np $NUM_GPUS -ppn $PPN \
---hostfile \$PBS_NODEFILE \
---cpu-bind depth -d 16 \
-./shell_scripts/set_affinity_gpu_polaris.sh \
-$VENV_PATH/bin/python protlig_dd/training/run_train_uniref_ddp_polaris.py \
+$VENV_PATH/bin/python protlig_dd/training/run_train_uniref_ddp_aurora.py \
 --work_dir "$WORK_DIR" \
 --config "$CONFIG_FILE" \
 --datafile "$DATAFILE" \
@@ -246,14 +237,14 @@ $VENV_PATH/bin/python protlig_dd/training/run_train_uniref_ddp_polaris.py \
 --wandb_name "$RUN_NAME" \
 --device "$DEVICE" \
 --seed $SEED \
-$FRESH_FLAG 2>&1 | tee "$LOG_DIR/polaris_ddp_${NODES}nodes_testqueue.log"
+$FRESH_FLAG 2>&1 | tee "$LOG_DIR/aurora_ddp_${NODES}nodes_production.log"
 
 EOF
 
 echo "✅ Job script created: $JOB_SCRIPT"
 echo ""
 
-echo "🎬 SUBMITTING POLARIS JOB..."
+echo "🎬 SUBMITTING AURORA JOB..."
 echo "=========================="
 
 # Submit the job
@@ -264,7 +255,7 @@ if [ $? -eq 0 ]; then
     echo "============================="
     echo "📋 Job ID: $JOB_ID"
     echo "📁 Work Dir: $WORK_DIR"
-    echo "📊 Logs: $LOG_DIR/polaris_ddp_${JOB_ID}.{out,err}"
+    echo "📊 Logs: $LOG_DIR/aurora_ddp_${JOB_ID}.{out,err}"
     echo ""
     echo "🔍 Monitor job status:"
     echo "   qstat $JOB_ID"
@@ -283,4 +274,4 @@ fi
 fi  # End of EXECUTION_MODE if-else block
 
 echo ""
-echo "=== Polaris DDP script finished ==="
+echo "=== Aurora DDP script finished ==="

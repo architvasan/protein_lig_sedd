@@ -1998,12 +1998,15 @@ class OptimizedUniRef50Trainer:
             # Standard uniform timestep sampling
             t = torch.rand(batch.shape[0], device=self.device) * (1 - 1e-3) + 1e-3
 
+        model_to_use = self.model_ddp if self.use_ddp else self.model
         sigma, dsigma = self.noise(t)
 
         # Ensure consistent dtypes for all tensors
-        model_dtype = next(self.model.parameters()).dtype
-        if batch.dtype != model_dtype:
-            batch = batch.to(dtype=model_dtype)
+        model_dtype = next(model_to_use.parameters()).dtype
+        if False:
+            if batch.dtype != model_dtype:
+                batch = batch.to(dtype=model_dtype)
+        #batch = batch.to(torch.int32)
         if sigma.dtype != model_dtype:
             sigma = sigma.to(dtype=model_dtype)
         if dsigma.dtype != model_dtype:
@@ -2023,7 +2026,7 @@ class OptimizedUniRef50Trainer:
         else:
             # Use standard transition (either no curriculum or probabilistic curriculum already applied)
             perturbed_batch = self.graph.sample_transition(batch, sigma)  # Fixed: removed [:, None]
-
+        
         # Validate perturbed_batch is 2D: [batch_size, sequence_length]
         if perturbed_batch.dim() != 2:
             raise ValueError(f"perturbed_batch must be 2D [batch_size, seq_len], got {perturbed_batch.dim()}D with shape {perturbed_batch.shape}. This indicates an issue in the graph operations.")
@@ -2032,12 +2035,13 @@ class OptimizedUniRef50Trainer:
         try:
             device_type = str(self.device).split(':')[0]
             # Use DDP model for training
-            model_to_use = self.model_ddp if self.use_ddp else self.model
 
             if self.use_amp and device_type == 'xpu':
                 with torch.xpu.amp.autocast():
+                    sigma_expanded = sigma[:, None].expand(-1, batch.shape[1])
                     log_score = model_to_use(perturbed_batch, sigma)
-                    loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)
+                    loss = self.graph.score_entropy(log_score, sigma[:, None], perturbed_batch, batch)#sigma[:, None]
+
             elif self.use_amp and device_type == 'cuda':
                 with torch.cuda.amp.autocast():
                     sigma_expanded = sigma[:, None].expand(-1, batch.shape[1])
@@ -2100,13 +2104,12 @@ class OptimizedUniRef50Trainer:
 
         # Move batch to device and ensure correct shape and dtype
         batch = batch.to(self.device)
-
+        #batch = batch.to(torch.int32)
         # Ensure consistent dtype - convert to model's dtype if needed
         model_dtype = next(self.model.parameters()).dtype
-        if batch.dtype != model_dtype:
-            print(f"🔧 Converting batch dtype from {batch.dtype} to {model_dtype}")
-            batch = batch.to(dtype=model_dtype)
-
+        #if batch.dtype != model_dtype:
+        #    batch = batch.to(dtype=model_dtype)
+        
         # Ensure batch is 2D: [batch_size, sequence_length]
         if batch.dim() > 2:
             print(f"WARNING: Batch has {batch.dim()} dimensions, reshaping from {batch.shape}")
@@ -2587,7 +2590,7 @@ class OptimizedUniRef50Trainer:
                 # Note: No barrier needed here - only rank 0 does evaluation, others continue normally
 
                 # Quick generation test (more frequent than comprehensive evaluation)
-                quick_gen_freq = getattr(self.cfg.training, 'quick_gen_freq', self.cfg.training.log_freq * 30)
+                quick_gen_freq = getattr(self.cfg.training, 'quick_gen_freq', self.cfg.training.log_freq * 5)
                 if step % quick_gen_freq == 0 and step > 0:
                     self.quick_generation_test(step, epoch)
 
