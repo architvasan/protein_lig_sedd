@@ -2616,8 +2616,8 @@ class OptimizedUniRef50Trainer:
                         best_loss = avg_epoch_loss
                         print(f"🎉 New best loss: {best_loss:.4f}")
 
-                        if self.rank==0:
-                            self.save_checkpoint(step, epoch, best_loss, is_best)
+                    if self.rank==0:
+                        self.save_checkpoint(step, epoch, best_loss, is_best)
 
                     # Log checkpoint info
                     if False:

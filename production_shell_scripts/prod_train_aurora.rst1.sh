@@ -50,25 +50,24 @@ DATAFILE="${PWD}/input_data/processed_uniref50.pt"
 WANDB_PROJECT="uniref50_polaris_ddp"
 DEVICE="xpu"  # Polaris uses NVIDIA CUDA
 SEED=42
+CHECKPOINT_FILE="/lus/flare/projects/FoundEpidem/avasan/IDEAL/Diffusion/diffusion_training/protein_lig_sedd/experiments/polaris_ddp_10nodes20250929_205202/checkpoints/checkpoint_step_1500.pth"
 
 # DDP Configuration
 AFFINITY_FILE="${PWD}/shell_scripts/set_affinity_gpu_polaris.sh" #file to set gpu aff
 MASTER_PORT=29500            # Port for DDP communication
 BACKEND="nccl"                # Use NCCL backend for NVIDIA GPUs
 
-
 # Checkpoint Handling (no interactive prompts for queue systems)
-CHECKPOINT_ACTION="ignore"   # Options: "remove", "backup", "ignore", "cancel"
+CHECKPOINT_ACTION="restart"   # Options: "remove", "backup", "ignore", "cancel", "restart"
                             # remove: Delete existing checkpoints
                             # backup: Move checkpoints to timestamped backup
                             # ignore: Use --fresh flag to ignore checkpoints
                             # cancel: Exit if checkpoints exist
+                            # restart: Continue from existing checkpoint
 
 #############################################
 # 🚀 SCRIPT EXECUTION - DO NOT MODIFY BELOW
 #############################################
-
-
 
 echo "🚀 Aurora DDP FRESH TRAINING"
 echo "============================"
@@ -112,6 +111,9 @@ if [ -d "$WORK_DIR/checkpoints" ] && [ "$(ls -A $WORK_DIR/checkpoints)" ]; then
             rm -rf "$WORK_DIR/checkpoints/"
             echo "✅ Checkpoints removed"
             ;;
+        "restart")
+            echo "Restarting from $CHECKPOINT_FILE"
+            ;;
         "backup")
             backup_dir="$WORK_DIR/checkpoints_backup_$(date +%Y%m%d_%H%M%S)"
             echo "📦 Backing up checkpoints to $backup_dir..."
@@ -152,6 +154,7 @@ echo "   Device: $DEVICE"
 echo "   Seed: $SEED"
 echo "   GPUs: $NUM_GPUS"
 echo "   Checkpoint Action: $CHECKPOINT_ACTION"
+echo "   Checkpoint file to restart: $CHECKPOINT_FILE"
 echo "   Fresh Start: ${FRESH_FLAG:-No (checkpoints handled)}"
 echo ""
 
@@ -176,6 +179,7 @@ if [ "$EXECUTION_MODE" = "interactive" ]; then
         --config "$CONFIG_FILE" \
         --datafile "$DATAFILE" \
         --tokenize_on_fly \
+        --resume_checkpoint "$CHECKPOINT_FILE" \
         --wandb_project "$WANDB_PROJECT" \
         --wandb_name "$RUN_NAME" \
         --device "$DEVICE" \
@@ -214,8 +218,8 @@ else
 #PBS -A FoundEpidem
 #PBS -l filesystems=flare
 #PBS -N ${JOB_NAME}
-#PBS -o ${LOG_DIR}/aurora_ddp_${NODES}.out
-#PBS -e ${LOG_DIR}/aurora_ddp_${NODES}.err
+#PBS -o ${LOG_DIR}/aurora_ddp_${NODES}.rst1.out
+#PBS -e ${LOG_DIR}/aurora_ddp_${NODES}.rst1.err
 
 # Load modules and activate environment
 module load frameworks
@@ -234,11 +238,12 @@ $VENV_PATH/bin/python protlig_dd/training/run_train_uniref_ddp_aurora.py \
 --config "$CONFIG_FILE" \
 --datafile "$DATAFILE" \
 --tokenize_on_fly \
+--resume_checkpoint $CHECKPOINT_FILE \
 --wandb_project "$WANDB_PROJECT" \
 --wandb_name "$RUN_NAME" \
 --device "$DEVICE" \
 --seed $SEED \
-$FRESH_FLAG 2>&1 | tee "$LOG_DIR/aurora_ddp_${NODES}nodes_production.log"
+ 2>&1 | tee "$LOG_DIR/aurora_ddp_${NODES}nodes_production.rst1.log"
 
 EOF
 
