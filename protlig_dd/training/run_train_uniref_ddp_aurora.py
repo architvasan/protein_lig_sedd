@@ -447,6 +447,7 @@ class OptimizedUniRef50Trainer:
     force_fresh_start: bool = False
     sampling_method: str = "rigorous"  # "rigorous" or "simple"
     epochs_override: Optional[int] = None  # Override epochs for hyperparameter sweeps
+    start_step: Optional[int] = None  # Start training from arbitrary step (overrides checkpoint step)
     use_ddp: bool = True
     use_wandb: bool = True  # Toggle wandb logging on/off
     minimal_mode: bool = False  # Minimal mode for large-scale DDP debugging
@@ -2426,10 +2427,26 @@ class OptimizedUniRef50Trainer:
                     print("Loaded scheduler state dict")
 
                 # Load training state
-                step = checkpoint.get('step', 0)
+                checkpoint_step = checkpoint.get('step', 0)
                 start_epoch = checkpoint.get('epoch', 0)
                 best_loss = checkpoint.get('best_loss', float('inf'))
-                print(f"{step=}, {start_epoch=}, {best_loss=}")
+
+                # Override step if start_step is specified
+                if self.start_step is not None:
+                    step = self.start_step
+                    print(f"🔄 Overriding checkpoint step {checkpoint_step} with start_step {step}")
+                    # Calculate which epoch this step corresponds to
+                    # This is approximate - we'll adjust during training loop
+                    if hasattr(self, 'train_loader') and len(self.train_loader) > 0:
+                        steps_per_epoch = len(self.train_loader)
+                        start_epoch = step // steps_per_epoch
+                        print(f"📊 Calculated start_epoch {start_epoch} based on {steps_per_epoch} steps per epoch")
+                    else:
+                        print("⚠️  Cannot calculate epoch from step - train_loader not available yet")
+                else:
+                    step = checkpoint_step
+
+                print(f"checkpoint_step={checkpoint_step}, final_step={step}, start_epoch={start_epoch}, best_loss={best_loss}")
 
                 # Initialize state if not exists
                 if not hasattr(self, 'state'):
@@ -2439,8 +2456,9 @@ class OptimizedUniRef50Trainer:
 
                 print(self.state['step'])
                 print(f"✅ Resumed from checkpoint:")
-                print(f"   Step: {step}")
-                print(f"   Epoch: {start_epoch}")
+                print(f"   Checkpoint step: {checkpoint_step}")
+                print(f"   Starting step: {step}")
+                print(f"   Starting epoch: {start_epoch}")
                 print(f"   Best loss: {best_loss:.4f}")
 
             if False:#except Exception as e:
@@ -2452,10 +2470,21 @@ class OptimizedUniRef50Trainer:
                 import sys
                 sys.exit()
         else:
-            if self.force_fresh_start:
-                print("🆕 Force fresh start enabled. Starting training from scratch...")
+            # No checkpoint loaded - handle start_step override
+            if self.start_step is not None:
+                step = self.start_step
+                # Calculate which epoch this step corresponds to
+                if hasattr(self, 'train_loader') and len(self.train_loader) > 0:
+                    steps_per_epoch = len(self.train_loader)
+                    start_epoch = step // steps_per_epoch
+                    print(f"🔄 Starting from step {step} (epoch {start_epoch}) without checkpoint")
+                else:
+                    print(f"🔄 Starting from step {step} (epoch calculation pending)")
             else:
-                print("🆕 No existing checkpoint found. Starting training from scratch...")
+                if self.force_fresh_start:
+                    print("🆕 Force fresh start enabled. Starting training from scratch...")
+                else:
+                    print("🆕 No existing checkpoint found. Starting training from scratch...")
 
         # Initialize state if not exists
         if not hasattr(self, 'state'):
@@ -2497,13 +2526,25 @@ class OptimizedUniRef50Trainer:
             epoch_loss = 0.0
             num_batches = 0
 
+            # Calculate steps to skip in this epoch if resuming mid-epoch
+            steps_per_epoch = len(self.train_loader)
+            epoch_start_step = epoch * steps_per_epoch
+            steps_to_skip = max(0, step - epoch_start_step)
+
+            if steps_to_skip > 0:
+                print(f"🔄 Resuming mid-epoch: skipping {steps_to_skip} batches in epoch {epoch+1}")
+
             # Only show progress bar on rank 0 to avoid cluttered output
             if self.use_ddp and self.rank != 0:
                 data_iterator = self.train_loader
             else:
                 data_iterator = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{total_epochs}')
 
-            for batch in data_iterator:
+            for batch_idx, batch in enumerate(data_iterator):
+                # Skip batches if resuming mid-epoch
+                if steps_to_skip > 0:
+                    steps_to_skip -= 1
+                    continue
                 # Training step with timing
                 loss, step_time, additional_metrics = self.train_step(batch)
 
@@ -2737,6 +2778,8 @@ def main():
                        help="Sampling method: 'rigorous' (CTMC) or 'simple' (heuristic)")
     parser.add_argument("--epochs", type=int, default=None,
                        help="Override number of epochs (useful for hyperparameter sweeps)")
+    parser.add_argument("--start_step", type=int, default=None,
+                       help="Start training from arbitrary step (overrides checkpoint step for mid-epoch resume)")
     parser.add_argument("--tokenize_on_fly", action="store_true",
                        help="Tokenize untokenized data on the fly (use with raw sequence data)")
     parser.add_argument("--use_streaming", action="store_true",
@@ -2760,6 +2803,7 @@ def main():
     print(f"🖥️  Device: {args.device}")
     print(f"🎲 Seed: {args.seed}")
     print(f"🧬 Sampling method: {args.sampling_method}")
+    print(f"🔄 Start step: {args.start_step if args.start_step is not None else 'from checkpoint/beginning'}")
     print(f"🔤 Tokenize on fly: {args.tokenize_on_fly}")
     print(f"🌊 Use streaming: {args.use_streaming}")
     print(f"📊 Wandb logging: {'disabled' if args.no_wandb else 'enabled'}")
@@ -2779,6 +2823,7 @@ def main():
             force_fresh_start=args.fresh,
             sampling_method=args.sampling_method,
             epochs_override=args.epochs,
+            start_step=args.start_step,
             use_wandb=not args.no_wandb,
             minimal_mode=args.minimal_mode,
             resume_checkpoint=args.resume_checkpoint
