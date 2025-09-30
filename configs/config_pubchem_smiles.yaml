@@ -62,7 +62,7 @@ graph:
 
 noise:
   type: cosine           # Cosine schedule works well for molecules
-  sigma_min: !!float "1e-4"
+  sigma_min: !!float "1e-2"
   sigma_max: 0.8
   eps: !!float "0.02"
 

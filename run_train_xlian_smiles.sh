@@ -22,13 +22,14 @@ DATA_FILE="/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/protein_
 
 # Run training
 cd /lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd
+cp $CONFIG_FILE $WORK_DIR/config.yaml
 
 python protlig_dd/training/run_train_smiles.py \
     --work_dir $WORK_DIR \
     --config $CONFIG_FILE \
     --datafile $DATA_FILE \
     --device cuda:0 \
-    --project "smiles-diffusion" \
+    --project "smiles-diffusion-2" \
     --name "pubchem-smiles-$(date +%Y%m%d_%H%M%S)" \
     --seed 42
 

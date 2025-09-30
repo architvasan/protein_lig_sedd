@@ -18,8 +18,6 @@ from itertools import chain
 import wandb
 import numpy as np
 import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 import yaml
 from dataclasses import dataclass
@@ -35,6 +33,9 @@ from protlig_dd.data.tokenize import Tok_Mol
 from protlig_dd.model.ema import ExponentialMovingAverage
 from protlig_dd.utils.lr_scheduler import WarmupCosineLR
 import protlig_dd.sampling.sampling as sampling
+from rdkit import Chem
+from rdkit import RDLogger
+RDLogger.DisableLog('rdApp.*')
 import json
 
 
@@ -328,18 +329,16 @@ class SMILESTrainer:
                         return next(self.model.parameters()).device
 
                 model_wrapper = ModelWrapper(self.model)
-
                 samples = sampler(model_wrapper, task="ligand_only")
 
-                # Post-process samples
                 for i in range(num_samples):
-                    try:
-                        sample_tokens = samples[i] if len(samples.shape) > 1 else samples
-                        seq = self.decode_smiles(sample_tokens)
-                        generated.append({'sample_id': i, 'raw_tokens': sample_tokens[:max_length].cpu().tolist() if torch.is_tensor(sample_tokens) else sample_tokens, 'smiles': seq})
-                    except Exception as e:
-                        print(f"⚠️ Error processing sample {i}: {e}")
-                        generated.append({'sample_id': i, 'raw_tokens': [], 'smiles': ''})
+                    sample_tokens = samples[i] if len(samples.shape) > 1 else samples
+                    seq = self.decode_smiles(sample_tokens)
+                    validity = Chem.MolFromSmiles(seq) is not None
+                    generated.append({'sample_id': i, 
+                                      'raw_tokens': sample_tokens[:max_length].cpu().tolist() if torch.is_tensor(sample_tokens) else sample_tokens, 
+                                      'smiles': seq, 
+                                      'validity': validity})
 
             except Exception as e:
                 print(f"⚠️ Rigorous sampling failed: {e}")
@@ -375,7 +374,7 @@ class SMILESTrainer:
                         t = torch.tensor([1.0 - step / float(num_diffusion_steps)], device=self.device)
                         device_type = str(self.device).split(':')[0]
                         if device_type == 'cuda':
-                            with torch.cuda.amp.autocast(enabled=False):
+                            with torch.amp.autocast("cuda", enabled=False):
                                 logits = self.model(sample, t)
                         else:
                             logits = self.model(sample, t)
@@ -678,18 +677,17 @@ class SMILESTrainer:
                 self.scheduler.step()
                 
                 # Logging
-                if step % 1000 == 0:
+                if step % 1000 == 0 and step > 0:
                     wandb.log({
                         'train/loss': loss.item(),
                         'train/lr': self.scheduler.get_last_lr()[0],
                         'train/step': step,
                         'train/epoch': epoch
-                    })
+                    }, step=step)
 
                     print(f"Step {step}, Loss: {loss.item():.6f}")
                 
-                # Save checkpoint and generate SMILES
-                if step % 10000 == 0:
+                if step % 10000 == 0 and step > 0:
                     self.save_checkpoint(step)
                     self.generate_and_save_smiles(step)
                 
@@ -737,30 +735,26 @@ class SMILESTrainer:
             print(f"Epoch {epoch} summary: train_loss={epoch_train_loss:.6f}, val_loss={epoch_val_loss}")
 
             # ---------------- Generate SMILES at epoch end ----------------
-            try:
-                num_gen = 100
-                sampling_method = safe_getattr(self.cfg, 'sampling.method', 'rigorous')
-                max_len = safe_getattr(self.cfg, 'data.max_smiles_len', 128)
+            num_gen = 100
+            sampling_method = safe_getattr(self.cfg, 'sampling.method', 'rigorous')
+            max_len = safe_getattr(self.cfg, 'data.max_smiles_len', 128)
 
-                generated = self.generate_smiles(num_gen, max_length=max_len, sampling_method=sampling_method)
+            generated = self.generate_smiles(num_gen, max_length=max_len, sampling_method=sampling_method)
 
-                # Save generated samples to sample_dir
-                timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-                jsonl_path = os.path.join(self.sample_dir, f'samples_epoch_{epoch}_{timestamp}.jsonl')
-                txt_path = os.path.join(self.sample_dir, f'samples_epoch_{epoch}_{timestamp}.txt')
+            # Save generated samples to sample_dir
+            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            jsonl_path = os.path.join(self.sample_dir, f'samples_epoch_{epoch}_{timestamp}.jsonl')
+            txt_path = os.path.join(self.sample_dir, f'samples_epoch_{epoch}_{timestamp}.txt')
 
-                with open(jsonl_path, 'w') as jf, open(txt_path, 'w') as tf:
-                    for rec in generated:
-                        jf.write(json.dumps(rec) + '\n')
-                        tf.write((rec.get('smiles', '') or '') + '\n')
+            with open(jsonl_path, 'w') as jf, open(txt_path, 'w') as tf:
+                for rec in generated:
+                    jf.write(json.dumps(rec) + '\n')
+                    tf.write((rec.get('smiles', '') or '') + '\n')
 
-                print(f"Saved {len(generated)} generated SMILES to: {jsonl_path} and {txt_path}")
+            print(f"Saved {len(generated)} generated SMILES to: {jsonl_path} and {txt_path}")
 
-                # Log example and count to wandb
-                wandb.log({'samples/generated_count': len(generated), 'samples/last_file': jsonl_path, 'samples/method': sampling_method}, step=step)
-
-            except Exception as e:
-                print(f"⚠️  Error during SMILES generation at epoch end: {e}")
+            # Log example and count to wandb
+            wandb.log({'samples/generated_count': len(generated), 'samples/last_file': jsonl_path, 'samples/method': sampling_method}, step=step)
 
         wandb.finish()
         print("Training completed!")
