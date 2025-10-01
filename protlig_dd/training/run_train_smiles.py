@@ -28,7 +28,6 @@ import protlig_dd.processing.losses as losses
 import protlig_dd.processing.graph_lib as graph_lib
 import protlig_dd.processing.noise_lib as noise_lib
 import protlig_dd.utils.utils as utils
-from protlig_dd.data.data import get_dataloaders
 from protlig_dd.data.tokenize import Tok_Mol, Tok_SmilesPE
 from protlig_dd.model.ema import ExponentialMovingAverage
 from protlig_dd.utils.lr_scheduler import WarmupCosineLR

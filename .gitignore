@@ -3302,7 +3302,6 @@ run_train_protonly_t2.sh
 run_train_protonly_t3.sh
 run_train_protonly_t4.sh
 run_train_protonly_t5.sh
-data/
 downloading.err
 generated_samples/
 hyperparam_experiments/
