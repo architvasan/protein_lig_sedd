@@ -848,8 +848,66 @@ class OptimizedUniRef50Trainer:
             'step': 0,
             'epoch': 0
         }
-        
+
+        # Loss spike detection
+        self.loss_history = []
+        self.spike_threshold = 2.0  # Loss spike threshold multiplier
+        self.max_history_length = 100  # Keep last 100 losses for spike detection
+
         print("Optimizer ready.")
+
+    def detect_loss_spike(self, current_loss):
+        """Detect if current loss is a spike and handle it."""
+        # Add current loss to history
+        self.loss_history.append(current_loss)
+
+        # Keep only recent history
+        if len(self.loss_history) > self.max_history_length:
+            self.loss_history.pop(0)
+
+        # Need at least 10 losses to detect spikes
+        if len(self.loss_history) < 10:
+            return False, "normal"
+
+        # Calculate recent average (excluding current loss)
+        recent_losses = self.loss_history[-20:-1]  # Last 19 losses
+        recent_avg = sum(recent_losses) / len(recent_losses)
+
+        # Check if current loss is a spike
+        is_spike = current_loss > recent_avg * self.spike_threshold
+
+        if is_spike:
+            spike_ratio = current_loss / recent_avg
+            print(f"🚨 LOSS SPIKE DETECTED!")
+            print(f"   Current loss: {current_loss:.6f}")
+            print(f"   Recent average: {recent_avg:.6f}")
+            print(f"   Spike ratio: {spike_ratio:.2f}x")
+            return True, f"spike_{spike_ratio:.2f}x"
+
+        return False, "normal"
+
+    def handle_loss_spike(self, step):
+        """Handle loss spike by reducing learning rate temporarily."""
+        print(f"🛡️  Handling loss spike at step {step}")
+
+        # Option 1: Reduce learning rate by half temporarily
+        for param_group in self.optimizer.param_groups:
+            old_lr = param_group['lr']
+            param_group['lr'] = old_lr * 0.5
+            print(f"   Reduced LR from {old_lr:.2e} to {param_group['lr']:.2e}")
+
+        # Option 2: Reset gradients to prevent explosion
+        self.optimizer.zero_grad()
+        print(f"   Cleared gradients to prevent explosion")
+
+        # Option 3: Restore EMA weights to model (more stable)
+        if hasattr(self, 'ema'):
+            self.ema.copy_to(self.model.parameters())
+            print(f"   Restored EMA weights to model")
+
+        # Skip this batch by returning early
+        print(f"   Skipping this training step to avoid gradient explosion")
+        return True  # Indicates spike was handled
 
     def setup_logging(self):
         """Setup logging system - either wandb or file logging."""
@@ -2120,6 +2178,15 @@ class OptimizedUniRef50Trainer:
         # Compute loss with DDP-aware accumulation
         loss = self.compute_loss(batch) / self.cfg.training.accum
         effective_accum = self.cfg.training.accum
+
+        # Detect loss spikes and handle them
+        is_spike, spike_info = self.detect_loss_spike(loss.item())
+        if is_spike:
+            spike_handled = self.handle_loss_spike(self.state['step'])
+            if spike_handled:
+                # Return early with zero loss to skip this step
+                step_time = time.time() - step_start_time
+                return 0.0, step_time, {'spike_detected': True, 'spike_info': spike_info}
 
         # Backward pass with device-aware gradient scaling
         if self.scaler is not None:
