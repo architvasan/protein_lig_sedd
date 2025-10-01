@@ -851,8 +851,8 @@ class OptimizedUniRef50Trainer:
 
         # Loss spike detection
         self.loss_history = []
-        self.spike_threshold = 2.0  # Loss spike threshold multiplier
-        self.max_history_length = 100  # Keep last 100 losses for spike detection
+        self.spike_threshold = 1.5  # Loss spike threshold multiplier
+        self.max_history_length = 300  # Keep last 100 losses for spike detection
 
         print("Optimizer ready.")
 
