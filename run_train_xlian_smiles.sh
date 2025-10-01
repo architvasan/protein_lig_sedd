@@ -9,20 +9,17 @@
 module load conda
 conda activate protlig_dd
 
-# Set environment variables
-export CUDA_VISIBLE_DEVICES=0
-export PYTHONPATH="/lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd:$PYTHONPATH"
+#export PYTHONPATH="/lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd:$PYTHONPATH"
 
-# Training parameters
-WORK_DIR="/lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd/experiments/smiles_$(date +%Y%m%d_%H%M%S)"
+PROJECT_ROOT="/lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd"
+WORK_DIR="$PROJECT_ROOT/experiments/smiles_$(date +%Y%m%d_%H%M%S)"
 #CONFIG_FILE="/lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd/configs/config.yaml"
-CONFIG_FILE="/lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd/configs/config_pubchem_smiles.yaml"
+CONFIG_FILE="$PROJECT_ROOT/configs/config_pubchem_smiles.yaml"
 DATA_FILE="/lus/eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/protein_lig_sedd/input_data/processed_pubchem.pt"
 #DATA_FILE="/lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd/input_data/processed_pubchem_subset_1k.pt"
 
 # Run training
-cd /lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd
-cp $CONFIG_FILE $WORK_DIR/config.yaml
+cd $PROJECT_ROOT
 
 python protlig_dd/training/run_train_smiles.py \
     --work_dir $WORK_DIR \
@@ -33,4 +30,5 @@ python protlig_dd/training/run_train_smiles.py \
     --name "pubchem-smiles-$(date +%Y%m%d_%H%M%S)" \
     --seed 42
 
+cp $CONFIG_FILE $WORK_DIR/config.yaml
 echo "Training completed. Results saved to: $WORK_DIR"

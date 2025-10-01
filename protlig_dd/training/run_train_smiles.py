@@ -29,7 +29,7 @@ import protlig_dd.processing.graph_lib as graph_lib
 import protlig_dd.processing.noise_lib as noise_lib
 import protlig_dd.utils.utils as utils
 from protlig_dd.data.data import get_dataloaders
-from protlig_dd.data.tokenize import Tok_Mol
+from protlig_dd.data.tokenize import Tok_Mol, Tok_SmilesPE
 from protlig_dd.model.ema import ExponentialMovingAverage
 from protlig_dd.utils.lr_scheduler import WarmupCosineLR
 import protlig_dd.sampling.sampling as sampling
@@ -108,7 +108,7 @@ class SMILESTrainer:
         os.makedirs(self.sample_dir, exist_ok=True)
 
         # Initialize tokenizer
-        self.tokenizer = Tok_Mol()
+        self.tokenizer = Tok_SmilesPE() #Tok_Mol()
         print("✅ SMILES tokenizer initialized")
 
         # Device-specific setup
@@ -163,15 +163,12 @@ class SMILESTrainer:
     
     def setup_data_loaders(self):
         """Setup data loaders for SMILES data."""
-        print("Setting up SMILES data loaders...")
 
         if Path(self.datafile).exists():
             print(f"Loading SMILES dataset: {self.datafile}")
             self.setup_custom_data_loaders()
         else:
             raise FileNotFoundError(f"SMILES data file not found: {self.datafile}")
-
-        print(f"SMILES data loaders ready.")
 
     def setup_custom_data_loaders(self):
         """Setup data loaders for SMILES data."""
@@ -288,120 +285,65 @@ class SMILESTrainer:
             self.ema.store(self.model.parameters())
             self.ema.copy_to(self.model.parameters())
 
-            try:
-                sampler = self.setup_smiles_sampler(batch_size=num_samples, max_length=max_length)
+            sampler = self.setup_smiles_sampler(batch_size=num_samples, max_length=max_length)
 
-                # Model wrapper matching sampling framework expectations
-                class ModelWrapper:
-                    def __init__(self, model):
-                        self.model = model
+            # Model wrapper matching sampling framework expectations
+            class ModelWrapper:
+                def __init__(self, model):
+                    self.model = model
 
-                    def __call__(self, x=None, sigma=None, **kwargs):
-                        # Called by sampler using ligand_indices / timesteps
-                        if 'ligand_indices' in kwargs and 'timesteps' in kwargs:
-                            ligand_indices = kwargs['ligand_indices']
-                            timesteps = kwargs['timesteps']
-                            mode = kwargs.get('mode', 'ligand_only')
+                def __call__(self, x=None, sigma=None, **kwargs):
+                    # Called by sampler using ligand_indices / timesteps
+                    if 'ligand_indices' in kwargs and 'timesteps' in kwargs:
+                        ligand_indices = kwargs['ligand_indices']
+                        timesteps = kwargs['timesteps']
+                        mode = kwargs.get('mode', 'ligand_only')
 
-                            if mode in ('ligand_only', 'ligand_given_protein'):
-                                return self.model(ligand_indices, timesteps)
-                            else:
-                                raise ValueError(f"SMILES model only supports ligand modes, got {mode}")
-
-                        elif x is not None and sigma is not None:
-                            # Legacy positional interface
-                            return self.model(x, sigma)
+                        if mode in ('ligand_only', 'ligand_given_protein'):
+                            return self.model(ligand_indices, timesteps)
                         else:
-                            raise ValueError(f"ModelWrapper called with invalid args: x={x}, sigma={sigma}, kwargs={list(kwargs.keys())}")
+                            raise ValueError(f"SMILES model only supports ligand modes, got {mode}")
 
-                    def eval(self):
-                        self.model.eval(); return self
-                    def train(self, mode=True):
-                        self.model.train(mode); return self
-                    def parameters(self):
-                        return self.model.parameters()
-                    def state_dict(self):
-                        return self.model.state_dict()
-                    def to(self, device):
-                        self.model.to(device); return self
-                    @property
-                    def device(self):
-                        return next(self.model.parameters()).device
+                    elif x is not None and sigma is not None:
+                        # Legacy positional interface
+                        return self.model(x, sigma)
+                    else:
+                        raise ValueError(f"ModelWrapper called with invalid args: x={x}, sigma={sigma}, kwargs={list(kwargs.keys())}")
 
-                model_wrapper = ModelWrapper(self.model)
-                samples = sampler(model_wrapper, task="ligand_only")
+                def eval(self):
+                    self.model.eval(); return self
+                def train(self, mode=True):
+                    self.model.train(mode); return self
+                def parameters(self):
+                    return self.model.parameters()
+                def state_dict(self):
+                    return self.model.state_dict()
+                def to(self, device):
+                    self.model.to(device); return self
+                @property
+                def device(self):
+                    return next(self.model.parameters()).device
 
-                for i in range(num_samples):
-                    sample_tokens = samples[i] if len(samples.shape) > 1 else samples
-                    seq = self.decode_smiles(sample_tokens)
-                    validity = Chem.MolFromSmiles(seq) is not None
-                    generated.append({'sample_id': i, 
-                                      'raw_tokens': sample_tokens[:max_length].cpu().tolist() if torch.is_tensor(sample_tokens) else sample_tokens, 
-                                      'smiles': seq, 
-                                      'validity': validity})
+            model_wrapper = ModelWrapper(self.model)
+            samples = sampler(model_wrapper, task="ligand_only")
 
-            except Exception as e:
-                print(f"⚠️ Rigorous sampling failed: {e}")
-                import traceback; traceback.print_exc()
-                print("🔄 Falling back to simple sampling")
-                generated = self.generate_smiles_simple(num_samples, max_length)
-
-            finally:
-                self.ema.restore(self.model.parameters())
-
-        self.model.train()
-        return generated
-
-    def generate_smiles_simple(self, num_samples: int = 10, max_length: int = 128, num_diffusion_steps: int = 50, temperature: float = 1.0):
-        """Simple heuristic sampling for SMILES (temperature multinomial over logits)."""
-        print(f"🧪 Generating {num_samples} SMILES (simple sampler) ...")
-        self.model.eval()
-        generated = []
-
-        with torch.no_grad():
             for i in range(num_samples):
-                try:
-                    # best-effort vocab / absorbing token
-                    tok = getattr(self.tokenizer, 'mol_tokenizer', None)
-                    vocab_size = getattr(tok, 'vocab_size', None) if tok is not None else None
-                    if vocab_size is None:
-                        vocab_size = safe_getattr(self.cfg, 'data.vocab_size_smiles', 30522)
-                    absorbing_token = vocab_size - 1
-
-                    sample = torch.full((1, max_length), absorbing_token, dtype=torch.long, device=self.device)
-
-                    for step in range(num_diffusion_steps):
-                        t = torch.tensor([1.0 - step / float(num_diffusion_steps)], device=self.device)
-                        device_type = str(self.device).split(':')[0]
-                        if device_type == 'cuda':
-                            with torch.amp.autocast("cuda", enabled=False):
-                                logits = self.model(sample, t)
-                        else:
-                            logits = self.model(sample, t)
-
-                        probs = torch.softmax(logits / temperature, dim=-1)
-                        batch_size, seq_len, vocab_actual = probs.shape
-                        probs_flat = probs.view(-1, vocab_actual)
-                        new_tokens = torch.multinomial(probs_flat, 1).view(batch_size, seq_len)
-
-                        replace_prob = (step + 1) / float(num_diffusion_steps)
-                        mask = torch.rand(batch_size, seq_len, device=self.device) < replace_prob
-                        sample = torch.where(mask, new_tokens, sample)
-
-                    seq = self.decode_smiles(sample[0])
-                    generated.append({'sample_id': i, 'raw_tokens': sample[0][:max_length].cpu().tolist(), 'smiles': seq})
-                except Exception as e:
-                    print(f"⚠️ Error generating simple sample {i}: {e}")
-                    generated.append({'sample_id': i, 'raw_tokens': [], 'smiles': ''})
+                sample_tokens = samples[i] if len(samples.shape) > 1 else samples
+                seq = self.decode_smiles(sample_tokens)
+                validity = Chem.MolFromSmiles(seq) is not None and len(seq) > 0
+                generated.append({'sample_id': i, 
+                                    'raw_tokens': sample_tokens[:max_length].cpu().tolist() if torch.is_tensor(sample_tokens) else sample_tokens, 
+                                    'smiles': seq, 
+                                    'validity': validity})
+            self.ema.restore(self.model.parameters())
 
         self.model.train()
         return generated
+
 
     def generate_smiles(self, num_samples: int = 10, max_length: int = 128, sampling_method: str = 'rigorous'):
         if sampling_method == 'rigorous':
             return self.generate_smiles_rigorous(num_samples, max_length)
-        elif sampling_method == 'simple':
-            return self.generate_smiles_simple(num_samples, max_length)
         else:
             raise ValueError(f"Unknown sampling method: {sampling_method}")
 
@@ -474,7 +416,7 @@ class SMILESTrainer:
         
         device_type = str(self.device).split(':')[0]
         if device_type == 'cuda':
-            self.scaler = torch.cuda.amp.GradScaler()
+            self.scaler = torch.amp.GradScaler('cuda')
             self.use_amp = True
             print("✅ Using CUDA mixed precision training")
         else:
@@ -677,7 +619,7 @@ class SMILESTrainer:
                 self.scheduler.step()
                 
                 # Logging
-                if step % 1000 == 0 and step > 0:
+                if step % 1000 == 0:
                     wandb.log({
                         'train/loss': loss.item(),
                         'train/lr': self.scheduler.get_last_lr()[0],

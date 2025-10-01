@@ -2,7 +2,7 @@
 """Extract a deterministic subset of N samples from a processed .pt file.
 
 Usage:
-    python scripts/extract_pubchem_subset.py /path/to/processed_pubchem.pt /path/to/output_subset.pt --n 1000
+python extract_pubchem_subset.py /eagle/projects/FoundEpidem/avasan/IDEAL/DiffusionModels/protein_lig_sedd/input_data/processed_pubchem.pt /lus/eagle/projects/FoundEpidem/xlian/protein_lig_sedd/processed_pubchem_subset_50k.pt --n 50000
 """
 import argparse
 import torch
