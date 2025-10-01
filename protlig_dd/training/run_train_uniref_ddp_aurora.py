@@ -2179,14 +2179,16 @@ class OptimizedUniRef50Trainer:
         loss = self.compute_loss(batch) / self.cfg.training.accum
         effective_accum = self.cfg.training.accum
 
-        # Detect loss spikes and handle them
-        is_spike, spike_info = self.detect_loss_spike(loss.item())
-        if is_spike:
-            spike_handled = self.handle_loss_spike(self.state['step'])
-            if spike_handled:
-                # Return early with zero loss to skip this step
-                step_time = time.time() - step_start_time
-                return 0.0, step_time, {'spike_detected': True, 'spike_info': spike_info}
+        # Simple spike monitoring (no intervention to avoid hangs)
+        if len(self.loss_history) > 10:
+            recent_avg = sum(self.loss_history[-10:]) / 10
+            if loss.item() > recent_avg * 2.0:
+                print(f"⚠️  High loss detected: {loss.item():.6f} (recent avg: {recent_avg:.6f})")
+
+        # Add to history for monitoring
+        self.loss_history.append(loss.item())
+        if len(self.loss_history) > self.max_history_length:
+            self.loss_history.pop(0)
 
         # Backward pass with device-aware gradient scaling
         if self.scaler is not None:
