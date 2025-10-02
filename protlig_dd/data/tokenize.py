@@ -6,7 +6,7 @@ import selfies as sf
 from typing import List, Dict, Optional
 try:
     from SmilesPE.tokenizer import *
-    from smallmolec_campaign.utils.smiles_pair_encoders_functions import * #SMILES_SPE_Tokenizer
+    from protlig_dd.data.smiles_pair_encoders_functions import * #SMILES_SPE_Tokenizer
 except ImportError as e:
     print(f"SmilesPE not installed: {e}")
 
@@ -37,13 +37,13 @@ class Tok_Prot :
 class Tok_SmilesPE:
     mol_model_id: str = "ibm/MoLFormer-XL-both-10pct"
     maxlength: int = 128
-    #vocab_file: str = '../../VocabFiles/vocab_spe.txt'
-    #spe_file: str = '../../VocabFiles/SPE_ChEMBL.txt'
+    vocab_file: str = '../../VocabFiles/vocab_spe.txt'
+    spe_file: str = '../../VocabFiles/SPE_ChEMBL.txt'
 
     def __post_init__(self):
-        vocab_file = '/lus/eagle/projects/FoundEpidem/xlian/smallmolec_campaign/VocabFiles/vocab_spe.txt'
-        spe_file = '/lus/eagle/projects/FoundEpidem/xlian/smallmolec_campaign/VocabFiles/SPE_ChEMBL.txt'
-        self.mol_tokenizer = SMILES_SPE_Tokenizer(vocab_file=vocab_file, spe_file=spe_file)
+        #vocab_file = '/lus/eagle/projects/FoundEpidem/xlian/smallmolec_campaign/VocabFiles/vocab_spe.txt'
+        #spe_file = '/lus/eagle/projects/FoundEpidem/xlian/smallmolec_campaign/VocabFiles/SPE_ChEMBL.txt'
+        self.mol_tokenizer = SMILES_SPE_Tokenizer(vocab_file=self.vocab_file, spe_file=self.spe_file)
 
     def tokenize(self, smiles_list):
         """Tokenize ligands & get embeddings"""
