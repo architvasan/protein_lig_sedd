@@ -2179,11 +2179,22 @@ class OptimizedUniRef50Trainer:
         loss = self.compute_loss(batch) / self.cfg.training.accum
         effective_accum = self.cfg.training.accum
 
-        # Simple spike monitoring (no intervention to avoid hangs)
+        # Simple spike monitoring with EMA restoration
         if len(self.loss_history) > 10:
             recent_avg = sum(self.loss_history[-10:]) / 10
-            if loss.item() > recent_avg * 2.0:
-                print(f"⚠️  High loss detected: {loss.item():.6f} (recent avg: {recent_avg:.6f})")
+            if loss.item() > recent_avg * self.spike_threshold:
+                print(f"🚨 SPIKE DETECTED: {loss.item():.6f} (recent avg: {recent_avg:.6f}, ratio: {loss.item()/recent_avg:.2f}x)")
+
+                # Restore EMA weights to prevent cascade
+                if hasattr(self, 'ema'):
+                    print("🔄 Restoring EMA weights to prevent instability cascade")
+                    self.ema.copy_to(self.model.parameters())
+
+                # Reduce learning rate temporarily
+                for param_group in self.optimizer.param_groups:
+                    old_lr = param_group['lr']
+                    param_group['lr'] = old_lr * 0.5
+                    print(f"🔽 Reduced LR from {old_lr:.2e} to {param_group['lr']:.2e}")
 
         # Add to history for monitoring
         self.loss_history.append(loss.item())
@@ -2226,6 +2237,37 @@ class OptimizedUniRef50Trainer:
                     total_norm += param_norm.item() ** 2
             total_norm = total_norm ** (1. / 2)
             additional_metrics['grad_norm'] = total_norm
+
+            # PROACTIVE spike prevention based on gradient norm (DDP-safe)
+            grad_norm_threshold = self.cfg.optim.grad_clip * 2.0  # 2x the clip threshold
+            should_skip_local = total_norm > grad_norm_threshold
+
+            # Synchronize skip decision across all DDP ranks
+            if self.use_ddp and torch.distributed.is_initialized():
+                # Convert to tensor for all_reduce
+                skip_tensor = torch.tensor(float(should_skip_local), device=self.device)
+                torch.distributed.all_reduce(skip_tensor, op=torch.distributed.ReduceOp.MAX)
+                should_skip_global = skip_tensor.item() > 0.5  # Any rank wants to skip
+            else:
+                should_skip_global = should_skip_local
+
+            if should_skip_global:
+                if should_skip_local:  # Only print on ranks that detected the issue
+                    print(f"🚨 HIGH GRADIENT NORM DETECTED: {total_norm:.4f} (threshold: {grad_norm_threshold:.4f})")
+                    print("🔄 Proactively restoring EMA weights to prevent spike")
+
+                # ALL ranks restore EMA weights and skip (synchronized)
+                if hasattr(self, 'ema'):
+                    self.ema.copy_to(self.model.parameters())
+
+                # ALL ranks zero gradients and skip update
+                self.optimizer.zero_grad()
+
+                if self.rank == 0 or not self.use_ddp:  # Only rank 0 prints
+                    print("⏭️  All ranks skipping this update to prevent gradient explosion")
+
+                step_time = time.time() - step_start_time
+                return loss.item(), step_time, {'gradient_spike_prevented': True, 'grad_norm': total_norm}
 
             # Clip gradients
             if self.cfg.optim.grad_clip > 0:
