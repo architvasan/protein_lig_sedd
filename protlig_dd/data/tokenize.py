@@ -36,9 +36,9 @@ class Tok_Prot :
 @dataclass
 class Tok_SmilesPE:
     mol_model_id: str = "ibm/MoLFormer-XL-both-10pct"
-    maxlength: int = 128
-    vocab_file: str = '../../VocabFiles/vocab_spe.txt'
-    spe_file: str = '../../VocabFiles/SPE_ChEMBL.txt'
+    maxlength: int = 64
+    vocab_file: str = '/lus/flare/projects/FoundEpidem/xlian/protein_lig_sedd/VocabFiles/vocab_spe.txt'
+    spe_file: str = '/lus/flare/projects/FoundEpidem/xlian/protein_lig_sedd/VocabFiles/SPE_ChEMBL.txt'
 
     def __post_init__(self):
         #vocab_file = '/lus/eagle/projects/FoundEpidem/xlian/smallmolec_campaign/VocabFiles/vocab_spe.txt'

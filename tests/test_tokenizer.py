@@ -37,9 +37,9 @@ example_smiles = [
   {"lig_smiles": "C1=CC(=O)C=CC1=O"}
 ]
 
-tokenize_smiles = tokenize.Tok_SmilesPE(vocab_file = "/lus/flare/projects/FoundEpidem/xlian/protein_lig_sedd/VocabFiles/vocab_spe.txt",
-                                        spe_file = "/lus/flare/projects/FoundEpidem/xlian/protein_lig_sedd/VocabFiles/SPE_ChEMBL.txt")
-
+#tokenize_smiles = tokenize.Tok_SmilesPE(vocab_file = "/lus/flare/projects/FoundEpidem/xlian/protein_lig_sedd/VocabFiles/vocab_spe.txt",
+#                                        spe_file = "/lus/flare/projects/FoundEpidem/xlian/protein_lig_sedd/VocabFiles/SPE_ChEMBL.txt")
+tokenize_smiles = tokenize.Tok_Mol()
 
 for row in example_smiles:
     tokenized_row = tokenize_smiles.tokenize(row['lig_smiles'])

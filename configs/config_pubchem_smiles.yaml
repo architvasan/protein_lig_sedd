@@ -8,7 +8,7 @@ model:
   type: ddit
   hidden_size: 768
   cond_dim: 256
-  length: 512            # Max SMILES length
+  length: 64           # Max SMILES length
   n_blocks_prot: 8
   n_blocks_lig: 8
   n_heads: 12
@@ -50,7 +50,7 @@ data:
   train_ratio: 0.95
   val_ratio: 0.05
   max_protein_len: 512   # Not used for SMILES-only
-  max_ligand_len: 512    # Max SMILES length
+  max_ligand_len: 64    # Max SMILES length
   use_structure: False
   vocab_size_protein: 36 # Not used
   vocab_size_ligand: 2364 # SMILES vocab size
@@ -96,3 +96,8 @@ lr_schedule:
 hydra:
   run:
     dir: exp_local/pubchem_smiles/${now:%Y.%m.%d}/${now:%H%M%S}
+
+curriculum:
+  enabled: true
+  probabilistic: true
+  preschool_time: 2500
